@@ -7,6 +7,7 @@ import (
 	"os"
 	"path"
 	"strings"
+	"time"
 
 	"github.com/navidrome/navidrome/plugins/pdk/go/host"
 	"github.com/navidrome/navidrome/plugins/pdk/go/lifecycle"
@@ -17,11 +18,22 @@ import (
 const (
 	scanScheduleID    = "bpm-scan"
 	triggerScheduleID = "bpm-trigger-check"
+	processScheduleID = "bpm-process"
 
 	kvLastTrigger = "trigger:last"
 	kvScanLock    = "scan:lock"
-	// scanLockTTL bounds how long a crashed scan can block new ones.
-	scanLockTTL = 2 * 60 * 60
+	kvScanQueue   = "scan:queue"
+	kvScanStats   = "scan:stats"
+
+	// Navidrome kills any plugin call after 30s, so each batch stops
+	// analyzing after this budget and chains a follow-up one-time task.
+	batchTimeBudget = 15 * time.Second
+	// scanLockTTL only needs to outlive the gap between chained batches; if a
+	// batch is killed, the lock expires and the next scan resumes the queue.
+	scanLockTTL = 180
+	// pendingTTL bounds how long a song can be marked in-flight before a
+	// retry would treat it as poisonous again.
+	pendingTTL = 3600
 )
 
 type bpmPlugin struct{}
@@ -51,18 +63,30 @@ func (p *bpmPlugin) OnInit() error {
 		return fmt.Errorf("failed to schedule trigger check: %w", err)
 	}
 
+	// The plugin was just (re)loaded, so no scan can be running: clear any
+	// lock left behind by a killed batch (its defer never ran).
+	host.KVStoreDelete(kvScanLock)
+
 	pdk.Log(pdk.LogInfo, fmt.Sprintf("BPM plugin initialized, scan scheduled %s", spec))
 	return nil
 }
 
 func (p *bpmPlugin) OnCallback(req scheduler.SchedulerCallbackRequest) error {
-	if req.ScheduleID == triggerScheduleID {
+	switch req.ScheduleID {
+	case triggerScheduleID:
 		if !manualScanRequested() {
 			return nil
 		}
 		pdk.Log(pdk.LogInfo, "Manual scan requested via trigger_scan config")
+		return startScan()
+	case scanScheduleID:
+		return startScan()
+	case processScheduleID:
+		return processBatch()
+	default:
+		pdk.Log(pdk.LogWarn, fmt.Sprintf("Ignoring unknown schedule %q", req.ScheduleID))
+		return nil
 	}
-	return runScan()
 }
 
 // manualScanRequested reports whether the trigger_scan config value changed
@@ -83,83 +107,171 @@ func manualScanRequested() bool {
 	return true
 }
 
-func runScan() error {
-	// A manual trigger can fire while a periodic scan is running (and vice
-	// versa); a TTL-bounded KV lock keeps them from overlapping.
+type scanStats struct {
+	Analyzed int `json:"analyzed"`
+	Failed   int `json:"failed"`
+}
+
+// startScan builds the album work queue and processes the first batch. If a
+// queue is left over from an interrupted scan, it is resumed instead.
+func startScan() error {
 	if _, running, _ := host.KVStoreGet(kvScanLock); running {
 		pdk.Log(pdk.LogInfo, "A BPM scan is already running, skipping.")
 		return nil
 	}
-	if err := host.KVStoreSetWithTTL(kvScanLock, []byte("1"), scanLockTTL); err != nil {
-		return fmt.Errorf("failed to acquire scan lock: %w", err)
+
+	if _, pending, _ := host.KVStoreGet(kvScanQueue); pending {
+		pdk.Log(pdk.LogInfo, "Resuming interrupted BPM scan.")
+		return processBatch()
 	}
-	defer host.KVStoreDelete(kvScanLock)
 
 	pdk.Log(pdk.LogInfo, "Starting BPM scan...")
 
-	libs, err := host.LibraryGetAllLibraries()
-	if err != nil {
-		return fmt.Errorf("failed to list libraries: %w", err)
+	if libs, err := host.LibraryGetAllLibraries(); err == nil {
+		logLibraryMounts(libs)
 	}
-	if len(libs) == 0 {
-		pdk.Log(pdk.LogWarn, "No libraries available, skipping BPM scan")
-		return nil
-	}
-
-	logLibraryMounts(libs)
 
 	client, err := newSubsonicClient()
 	if err != nil {
 		return err
 	}
-
 	albums, err := client.fetchAllAlbums()
 	if err != nil {
 		return err
 	}
 	pdk.Log(pdk.LogInfo, fmt.Sprintf("Found %d albums to scan.", len(albums)))
 
+	ids := make([]string, len(albums))
+	for i, a := range albums {
+		ids[i] = a.ID
+	}
+	if err := saveQueue(ids); err != nil {
+		return err
+	}
+	if err := saveStats(scanStats{}); err != nil {
+		return err
+	}
+	return processBatch()
+}
+
+// processBatch analyzes songs until the time budget is spent, then either
+// schedules the next batch or finishes the scan.
+func processBatch() error {
+	if err := host.KVStoreSetWithTTL(kvScanLock, []byte("1"), scanLockTTL); err != nil {
+		return fmt.Errorf("failed to refresh scan lock: %w", err)
+	}
+
+	queue, err := loadQueue()
+	if err != nil {
+		return err
+	}
+	stats, err := loadStats()
+	if err != nil {
+		return err
+	}
+
+	libs, err := host.LibraryGetAllLibraries()
+	if err != nil {
+		return fmt.Errorf("failed to list libraries: %w", err)
+	}
+	if len(libs) == 0 {
+		pdk.Log(pdk.LogWarn, "No libraries available, aborting BPM scan")
+		return finishScan(stats)
+	}
+	client, err := newSubsonicClient()
+	if err != nil {
+		return err
+	}
 	sync := &playlistSync{client: client}
-	analyzed, failed := 0, 0
-	for _, alb := range albums {
-		songs, err := client.fetchAlbumSongs(alb.ID)
+
+	deadline := time.Now().Add(batchTimeBudget)
+	for len(queue) > 0 && time.Now().Before(deadline) {
+		albumID := queue[0]
+		songs, err := client.fetchAlbumSongs(albumID)
 		if err != nil {
-			pdk.Log(pdk.LogError, fmt.Sprintf("Failed to fetch album %s: %v", alb.ID, err))
+			pdk.Log(pdk.LogError, fmt.Sprintf("Failed to fetch album %s: %v", albumID, err))
+			queue = queue[1:]
 			continue
 		}
 
+		done := true
 		for _, s := range songs {
-			if !strings.EqualFold(s.Suffix, "mp3") {
-				continue // Only MP3 supported for now
+			if time.Now().After(deadline) {
+				done = false // revisit this album next batch; analyzed songs are cached
+				break
 			}
-
-			cacheKey := "bpm:" + s.ID
-			if _, exists, _ := host.KVStoreGet(cacheKey); exists {
-				continue
-			}
-
-			tempo, err := analyzeSong(libs, s)
-			if err != nil {
-				failed++
-				if failed <= maxFailureWarnings {
-					pdk.Log(pdk.LogWarn, fmt.Sprintf("Failed to analyze %q: %v", s.Path, err))
-				}
-				continue
-			}
-			analyzed++
-			pdk.Log(pdk.LogInfo, fmt.Sprintf("Analyzed %s: %.1f BPM", s.Title, tempo))
-
-			if err := host.KVStoreSet(cacheKey, []byte(fmt.Sprintf("%.1f", tempo))); err != nil {
-				pdk.Log(pdk.LogError, fmt.Sprintf("Failed to store BPM for %s: %v", s.ID, err))
-			}
-			if err := sync.addSong(s.ID, tempo); err != nil {
-				pdk.Log(pdk.LogWarn, fmt.Sprintf("Failed to add %s to playlist: %v", s.Title, err))
-			}
+			processSong(libs, sync, s, &stats)
+		}
+		if done {
+			queue = queue[1:]
 		}
 	}
 
-	pdk.Log(pdk.LogInfo, fmt.Sprintf("BPM scan complete: %d analyzed, %d failed.", analyzed, failed))
-	if analyzed == 0 && failed > 0 {
+	if err := saveStats(stats); err != nil {
+		return err
+	}
+	if len(queue) == 0 {
+		return finishScan(stats)
+	}
+	if err := saveQueue(queue); err != nil {
+		return err
+	}
+	if _, err := host.SchedulerScheduleOneTime(1, processScheduleID, processScheduleID); err != nil {
+		return fmt.Errorf("failed to schedule next batch: %w", err)
+	}
+	pdk.Log(pdk.LogInfo, fmt.Sprintf("BPM batch done (%d analyzed, %d failed so far), %d albums remaining.",
+		stats.Analyzed, stats.Failed, len(queue)))
+	return nil
+}
+
+func processSong(libs []host.Library, sync *playlistSync, s song, stats *scanStats) {
+	if !strings.EqualFold(s.Suffix, "mp3") {
+		return // Only MP3 supported for now
+	}
+	cacheKey := "bpm:" + s.ID
+	if _, exists, _ := host.KVStoreGet(cacheKey); exists {
+		return
+	}
+
+	// A leftover pending marker means a previous attempt was killed by the
+	// host mid-analysis; don't retry it or it will poison every batch.
+	pendingKey := "pending:" + s.ID
+	if _, crashed, _ := host.KVStoreGet(pendingKey); crashed {
+		pdk.Log(pdk.LogWarn, fmt.Sprintf("Skipping %q: previous analysis attempt did not finish", s.Path))
+		host.KVStoreSet(cacheKey, []byte("failed"))
+		host.KVStoreDelete(pendingKey)
+		stats.Failed++
+		return
+	}
+	host.KVStoreSetWithTTL(pendingKey, []byte("1"), pendingTTL)
+
+	tempo, err := analyzeSong(libs, s)
+	host.KVStoreDelete(pendingKey)
+	if err != nil {
+		stats.Failed++
+		if stats.Failed <= maxFailureWarnings {
+			pdk.Log(pdk.LogWarn, fmt.Sprintf("Failed to analyze %q: %v", s.Path, err))
+		}
+		host.KVStoreSet(cacheKey, []byte("failed"))
+		return
+	}
+	stats.Analyzed++
+	pdk.Log(pdk.LogInfo, fmt.Sprintf("Analyzed %s: %.1f BPM", s.Title, tempo))
+
+	if err := host.KVStoreSet(cacheKey, []byte(fmt.Sprintf("%.1f", tempo))); err != nil {
+		pdk.Log(pdk.LogError, fmt.Sprintf("Failed to store BPM for %s: %v", s.ID, err))
+	}
+	if err := sync.addSong(s.ID, tempo); err != nil {
+		pdk.Log(pdk.LogWarn, fmt.Sprintf("Failed to add %s to playlist: %v", s.Title, err))
+	}
+}
+
+func finishScan(stats scanStats) error {
+	host.KVStoreDelete(kvScanQueue)
+	host.KVStoreDelete(kvScanStats)
+	host.KVStoreDelete(kvScanLock)
+	pdk.Log(pdk.LogInfo, fmt.Sprintf("BPM scan complete: %d analyzed, %d failed.", stats.Analyzed, stats.Failed))
+	if stats.Analyzed == 0 && stats.Failed > 0 {
 		pdk.Log(pdk.LogWarn, "All analyses failed. If the errors say the file does not exist, the Subsonic API "+
 			"is reporting fake paths: enable 'Report Real Path' for this plugin's player "+
 			"(Settings > Players > navidrome-bpm-plugin), or set ND_SUBSONIC_DEFAULTREPORTREALPATH=true "+
@@ -168,8 +280,54 @@ func runScan() error {
 	return nil
 }
 
-// maxFailureWarnings caps per-song warn logs per scan; the rest stay at debug
-// level inside analyzeSong.
+func saveQueue(ids []string) error {
+	data, err := json.Marshal(ids)
+	if err != nil {
+		return err
+	}
+	if err := host.KVStoreSet(kvScanQueue, data); err != nil {
+		return fmt.Errorf("failed to save scan queue: %w", err)
+	}
+	return nil
+}
+
+func loadQueue() ([]string, error) {
+	data, exists, err := host.KVStoreGet(kvScanQueue)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load scan queue: %w", err)
+	}
+	if !exists {
+		return nil, nil
+	}
+	var ids []string
+	if err := json.Unmarshal(data, &ids); err != nil {
+		return nil, fmt.Errorf("corrupt scan queue: %w", err)
+	}
+	return ids, nil
+}
+
+func saveStats(stats scanStats) error {
+	data, err := json.Marshal(stats)
+	if err != nil {
+		return err
+	}
+	return host.KVStoreSet(kvScanStats, data)
+}
+
+func loadStats() (scanStats, error) {
+	var stats scanStats
+	data, exists, err := host.KVStoreGet(kvScanStats)
+	if err != nil || !exists {
+		return stats, err
+	}
+	if err := json.Unmarshal(data, &stats); err != nil {
+		return scanStats{}, fmt.Errorf("corrupt scan stats: %w", err)
+	}
+	return stats, nil
+}
+
+// maxFailureWarnings caps per-song warn logs per scan; analyzeSong errors
+// beyond it are still counted but not logged individually.
 const maxFailureWarnings = 5
 
 // analyzeSong tries the song's path under each library mount until one decodes.

@@ -25,6 +25,10 @@ const (
 	scanSamples = 1024
 
 	minAudioSeconds = 10.0
+	// maxAudioSeconds caps how much audio is decoded per song: enough for a
+	// stable tempo estimate while keeping each analysis well inside
+	// Navidrome's 30s plugin-call timeout.
+	maxAudioSeconds = 120.0
 )
 
 func detectBPM(filePath string) (float64, error) {
@@ -43,13 +47,16 @@ func detectBPMFromMP3(r io.Reader) (float64, error) {
 		return 0, fmt.Errorf("failed to decode mp3: %w", err)
 	}
 
+	sampleRate := int(decoder.SampleRate())
+	maxEnergySamples := int(maxAudioSeconds * float64(sampleRate) / energyInterval)
+
 	acc := &energyAccumulator{}
 	// go-mp3 always outputs 16-bit little-endian stereo at the source rate.
 	// Stream it through the energy accumulator so we never hold the full PCM
 	// data in memory (the Wasm sandbox has a limited heap).
 	buf := make([]byte, 32*1024)
 	rem := 0
-	for {
+	for len(acc.nrg) < maxEnergySamples {
 		n, err := decoder.Read(buf[rem:])
 		total := rem + n
 		used := acc.feedStereoS16LE(buf[:total])
@@ -62,7 +69,7 @@ func detectBPMFromMP3(r io.Reader) (float64, error) {
 		}
 	}
 
-	return detectTempoFromEnergy(acc.nrg, int(decoder.SampleRate()))
+	return detectTempoFromEnergy(acc.nrg, sampleRate)
 }
 
 // detectTempoFromEnergy scans an energy envelope (as produced by
