@@ -25,6 +25,7 @@ navidrome:
   password: password
 
 musicDir: /music
+navidromeMusicDir: /music
 
 analysis:
   detector: essentia
@@ -59,3 +60,5 @@ docker compose up --build
 ```
 
 Mount `/music` to the same library root Navidrome uses, and mount `/config` for `config.yaml` and the SQLite cache.
+
+When running on the host with `make run`, set `musicDir` to the host path that contains the same files. Leave `navidromeMusicDir` as the path Navidrome reports through the API, usually `/music`.

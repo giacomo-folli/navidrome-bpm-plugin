@@ -14,8 +14,9 @@ type Config struct {
 		Username string
 		Password string
 	}
-	MusicDir string
-	Cache    struct {
+	MusicDir          string
+	NavidromeMusicDir string
+	Cache             struct {
 		Path string
 	}
 	Analysis struct {
@@ -50,6 +51,7 @@ func Load() (Config, error) {
 	v.AutomaticEnv()
 
 	v.SetDefault("cache.path", "/config/cache.sqlite")
+	v.SetDefault("navidromeMusicDir", "/music")
 	v.SetDefault("analysis.detector", "essentia")
 	v.SetDefault("analysis.workers", 6)
 	v.SetDefault("playlist.bucketSize", 10)
@@ -66,6 +68,7 @@ func Load() (Config, error) {
 		"navidrome.username",
 		"navidrome.password",
 		"musicDir",
+		"navidromeMusicDir",
 		"cache.path",
 		"analysis.detector",
 		"analysis.workers",
@@ -81,6 +84,9 @@ func Load() (Config, error) {
 		if err := v.BindEnv(key); err != nil {
 			return Config{}, err
 		}
+	}
+	if err := v.BindEnv("navidromeMusicDir", "NBDPM_NAVIDROME_MUSICDIR"); err != nil {
+		return Config{}, err
 	}
 
 	if err := v.ReadInConfig(); err != nil {

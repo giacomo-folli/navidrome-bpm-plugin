@@ -22,13 +22,14 @@ type Track struct {
 }
 
 type Scanner struct {
-	api      API
-	musicDir string
-	pageSize int
+	api               API
+	musicDir          string
+	navidromeMusicDir string
+	pageSize          int
 }
 
-func New(api API, musicDir string) *Scanner {
-	return &Scanner{api: api, musicDir: musicDir, pageSize: 500}
+func New(api API, musicDir, navidromeMusicDir string) *Scanner {
+	return &Scanner{api: api, musicDir: musicDir, navidromeMusicDir: navidromeMusicDir, pageSize: 500}
 }
 
 func (s *Scanner) Tracks(ctx context.Context) ([]Track, error) {
@@ -44,13 +45,13 @@ func (s *Scanner) Tracks(ctx context.Context) ([]Track, error) {
 				return nil, err
 			}
 			for _, song := range album.Songs {
-				path := resolvePath(s.musicDir, song.Path)
+				path := resolvePath(s.musicDir, s.navidromeMusicDir, song.Path)
 				if path == "" {
 					return nil, fmt.Errorf("song %q has no path; Navidrome must expose paths for local analysis", song.ID)
 				}
 				info, err := os.Stat(path)
 				if err != nil {
-					return nil, fmt.Errorf("stat %s: %w", path, err)
+					return nil, fmt.Errorf("stat resolved music path %q from Navidrome path %q: %w; set musicDir to the local host library root and navidromeMusicDir to the path Navidrome reports, usually /music", path, song.Path, err)
 				}
 				tracks = append(tracks, Track{
 					ID:       song.ID,
@@ -67,12 +68,22 @@ func (s *Scanner) Tracks(ctx context.Context) ([]Track, error) {
 	return tracks, nil
 }
 
-func resolvePath(musicDir, songPath string) string {
+func resolvePath(musicDir, navidromeMusicDir, songPath string) string {
 	if songPath == "" {
 		return ""
 	}
 	if filepath.IsAbs(songPath) {
+		if navidromeMusicDir != "" {
+			rel, err := filepath.Rel(filepath.Clean(navidromeMusicDir), filepath.Clean(songPath))
+			if err == nil && rel != "." && rel != ".." && !startsWithDotDot(rel) {
+				return filepath.Join(musicDir, rel)
+			}
+		}
 		return filepath.Clean(songPath)
 	}
 	return filepath.Join(musicDir, songPath)
+}
+
+func startsWithDotDot(path string) bool {
+	return path == ".." || len(path) > 3 && path[:3] == "../"
 }

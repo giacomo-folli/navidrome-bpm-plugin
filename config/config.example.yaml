@@ -4,6 +4,7 @@ navidrome:
   password: password
 
 musicDir: /music
+navidromeMusicDir: /music
 
 cache:
   path: /config/cache.sqlite
