@@ -38,6 +38,43 @@ func TestLibraryFilePath(t *testing.T) {
 	}
 }
 
+func TestManualScanRequested(t *testing.T) {
+	reset := func() {
+		host.ConfigMock.ExpectedCalls = nil
+		host.ConfigMock.Calls = nil
+		host.KVStoreMock.ExpectedCalls = nil
+		host.KVStoreMock.Calls = nil
+	}
+
+	t.Run("empty trigger does nothing", func(t *testing.T) {
+		reset()
+		host.ConfigMock.On("Get", "trigger_scan").Return("", false).Once()
+		if manualScanRequested() {
+			t.Error("expected no scan for unset trigger")
+		}
+	})
+
+	t.Run("unchanged trigger does nothing", func(t *testing.T) {
+		reset()
+		host.ConfigMock.On("Get", "trigger_scan").Return("now", true).Once()
+		host.KVStoreMock.On("Get", kvLastTrigger).Return([]byte("now"), true, nil).Once()
+		if manualScanRequested() {
+			t.Error("expected no scan for unchanged trigger")
+		}
+	})
+
+	t.Run("new trigger requests scan and is recorded", func(t *testing.T) {
+		reset()
+		host.ConfigMock.On("Get", "trigger_scan").Return("now-2", true).Once()
+		host.KVStoreMock.On("Get", kvLastTrigger).Return([]byte("now"), true, nil).Once()
+		host.KVStoreMock.On("Set", kvLastTrigger, []byte("now-2")).Return(nil).Once()
+		if !manualScanRequested() {
+			t.Error("expected scan for changed trigger")
+		}
+		host.KVStoreMock.AssertExpectations(t)
+	})
+}
+
 func TestPlaylistSyncAddSong(t *testing.T) {
 	host.SubsonicAPIMock.ExpectedCalls = nil
 	host.SubsonicAPIMock.Calls = nil

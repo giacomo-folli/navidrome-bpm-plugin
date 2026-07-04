@@ -30,6 +30,12 @@
           "title": "Scan Interval (Hours)",
           "default": 24,
           "description": "How often to scan the library for new tracks to analyze."
+        },
+        "trigger_scan": {
+          "type": "string",
+          "title": "Trigger Scan Now",
+          "default": "",
+          "description": "Change this value to any new text (e.g. 'now', or a timestamp) to start a scan within a minute."
         }
       }
     }

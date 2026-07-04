@@ -13,7 +13,15 @@ import (
 	"github.com/navidrome/navidrome/plugins/pdk/go/scheduler"
 )
 
-const scanScheduleID = "bpm-scan"
+const (
+	scanScheduleID    = "bpm-scan"
+	triggerScheduleID = "bpm-trigger-check"
+
+	kvLastTrigger = "trigger:last"
+	kvScanLock    = "scan:lock"
+	// scanLockTTL bounds how long a crashed scan can block new ones.
+	scanLockTTL = 2 * 60 * 60
+)
 
 type bpmPlugin struct{}
 
@@ -32,13 +40,57 @@ func (p *bpmPlugin) OnInit() error {
 	if _, err := host.SchedulerScheduleRecurring(spec, scanScheduleID, scanScheduleID); err != nil {
 		return fmt.Errorf("failed to schedule BPM scan: %w", err)
 	}
+	// Poll the trigger_scan config value so users can request a scan from the
+	// plugin's config UI (there is no way to invoke a plugin directly).
+	if _, err := host.SchedulerScheduleRecurring("@every 1m", triggerScheduleID, triggerScheduleID); err != nil {
+		return fmt.Errorf("failed to schedule trigger check: %w", err)
+	}
 
 	pdk.Log(pdk.LogInfo, fmt.Sprintf("BPM plugin initialized, scan scheduled %s", spec))
 	return nil
 }
 
 func (p *bpmPlugin) OnCallback(req scheduler.SchedulerCallbackRequest) error {
-	pdk.Log(pdk.LogInfo, "Starting periodic BPM scan...")
+	if req.ScheduleID == triggerScheduleID {
+		if !manualScanRequested() {
+			return nil
+		}
+		pdk.Log(pdk.LogInfo, "Manual scan requested via trigger_scan config")
+	}
+	return runScan()
+}
+
+// manualScanRequested reports whether the trigger_scan config value changed
+// since the last manual scan, and records the new value.
+func manualScanRequested() bool {
+	val, ok := host.ConfigGet("trigger_scan")
+	if !ok || val == "" {
+		return false
+	}
+	last, _, _ := host.KVStoreGet(kvLastTrigger)
+	if string(last) == val {
+		return false
+	}
+	if err := host.KVStoreSet(kvLastTrigger, []byte(val)); err != nil {
+		pdk.Log(pdk.LogError, fmt.Sprintf("Failed to record trigger value: %v", err))
+		return false
+	}
+	return true
+}
+
+func runScan() error {
+	// A manual trigger can fire while a periodic scan is running (and vice
+	// versa); a TTL-bounded KV lock keeps them from overlapping.
+	if _, running, _ := host.KVStoreGet(kvScanLock); running {
+		pdk.Log(pdk.LogInfo, "A BPM scan is already running, skipping.")
+		return nil
+	}
+	if err := host.KVStoreSetWithTTL(kvScanLock, []byte("1"), scanLockTTL); err != nil {
+		return fmt.Errorf("failed to acquire scan lock: %w", err)
+	}
+	defer host.KVStoreDelete(kvScanLock)
+
+	pdk.Log(pdk.LogInfo, "Starting BPM scan...")
 
 	libs, err := host.LibraryGetAllLibraries()
 	if err != nil {
