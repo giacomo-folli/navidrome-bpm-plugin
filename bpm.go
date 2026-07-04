@@ -84,8 +84,15 @@ func detectBPMFromMP3(r io.Reader) (float64, error) {
 	// no preemption, so a large Read could blow past the deadline unchecked.
 	buf := make([]byte, 8*1024)
 	rem := 0
+	minEnergySamples := int(minAudioSeconds * float64(sampleRate) / energyInterval)
 	for len(acc.nrg) < maxEnergySamples {
 		if time.Now().After(deadline) {
+			// A slow host may not decode maxAudioSeconds in time; analyze
+			// whatever is buffered rather than failing, as long as it clears
+			// the minimum the tempo scan needs.
+			if len(acc.nrg) >= minEnergySamples {
+				break
+			}
 			return 0, fmt.Errorf("decode too slow: %.1fs of audio in %s (decoder init took %s)",
 				audioSeconds(len(acc.nrg), sampleRate), time.Since(decodeStart).Round(100*time.Millisecond), initElapsed.Round(time.Millisecond))
 		}

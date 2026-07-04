@@ -16,6 +16,9 @@ import (
 )
 
 const (
+	// These name the plugin's logical tasks. They are passed as the schedule
+	// payload and dispatched on in OnCallback; the recurring schedules also use
+	// them as schedule IDs, but batch chaining cannot (see processBatch).
 	scanScheduleID     = "bpm-scan"
 	initScanScheduleID = "bpm-init-scan"
 	triggerScheduleID  = "bpm-trigger-check"
@@ -86,8 +89,11 @@ func (p *bpmPlugin) OnInit() error {
 	return nil
 }
 
+// OnCallback dispatches on the payload rather than the schedule ID: batch
+// chaining must use host-generated unique IDs (see processBatch), so the
+// payload carries the logical task name for every schedule.
 func (p *bpmPlugin) OnCallback(req scheduler.SchedulerCallbackRequest) error {
-	switch req.ScheduleID {
+	switch req.Payload {
 	case triggerScheduleID:
 		if !manualScanRequested() {
 			return nil
@@ -99,7 +105,7 @@ func (p *bpmPlugin) OnCallback(req scheduler.SchedulerCallbackRequest) error {
 	case processScheduleID:
 		return processBatch()
 	default:
-		pdk.Log(pdk.LogWarn, fmt.Sprintf("Ignoring unknown schedule %q", req.ScheduleID))
+		pdk.Log(pdk.LogWarn, fmt.Sprintf("Ignoring unknown schedule %q (payload %q)", req.ScheduleID, req.Payload))
 		return nil
 	}
 }
@@ -231,7 +237,12 @@ func processBatch() error {
 	if err := saveQueue(queue); err != nil {
 		return err
 	}
-	if _, err := host.SchedulerScheduleOneTime(1, processScheduleID, processScheduleID); err != nil {
+	// The schedule ID must be host-generated: Navidrome deletes a one-time
+	// schedule's entry only after its callback returns, so reusing a fixed ID
+	// from within the bpm-process callback fails with "already exists" (and
+	// cancel-then-reschedule would get the new entry deleted by that same
+	// post-callback cleanup).
+	if _, err := host.SchedulerScheduleOneTime(1, processScheduleID, ""); err != nil {
 		return fmt.Errorf("failed to schedule next batch: %w", err)
 	}
 	pdk.Log(pdk.LogInfo, fmt.Sprintf("BPM batch done (%d analyzed, %d failed so far), %d albums remaining.",
