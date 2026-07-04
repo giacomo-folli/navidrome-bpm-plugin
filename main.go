@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"os"
 	"path"
 	"strings"
 
@@ -105,6 +106,8 @@ func runScan() error {
 		return nil
 	}
 
+	logLibraryMounts(libs)
+
 	client, err := newSubsonicClient()
 	if err != nil {
 		return err
@@ -135,9 +138,12 @@ func runScan() error {
 				continue
 			}
 
-			tempo, ok := analyzeSong(libs, s)
-			if !ok {
+			tempo, err := analyzeSong(libs, s)
+			if err != nil {
 				failed++
+				if failed <= maxFailureWarnings {
+					pdk.Log(pdk.LogWarn, fmt.Sprintf("Failed to analyze %q: %v", s.Path, err))
+				}
 				continue
 			}
 			analyzed++
@@ -153,32 +159,62 @@ func runScan() error {
 	}
 
 	pdk.Log(pdk.LogInfo, fmt.Sprintf("BPM scan complete: %d analyzed, %d failed.", analyzed, failed))
+	if analyzed == 0 && failed > 0 {
+		pdk.Log(pdk.LogWarn, "All analyses failed. If the errors say the file does not exist, the Subsonic API "+
+			"is reporting fake paths: enable 'Report Real Path' for this plugin's player "+
+			"(Settings > Players > navidrome-bpm-plugin), or set ND_SUBSONIC_DEFAULTREPORTREALPATH=true "+
+			"and delete the plugin's player so it re-registers.")
+	}
 	return nil
 }
 
+// maxFailureWarnings caps per-song warn logs per scan; the rest stay at debug
+// level inside analyzeSong.
+const maxFailureWarnings = 5
+
 // analyzeSong tries the song's path under each library mount until one decodes.
-func analyzeSong(libs []host.Library, s song) (float64, bool) {
+func analyzeSong(libs []host.Library, s song) (float64, error) {
+	var errs []string
 	for _, lib := range libs {
-		tempo, err := detectBPM(libraryFilePath(lib, s.Path))
+		filePath := libraryFilePath(lib, s.Path)
+		tempo, err := detectBPM(filePath)
 		if err == nil {
-			return tempo, true
+			return tempo, nil
 		}
-		pdk.Log(pdk.LogDebug, fmt.Sprintf("Analysis of %s in library %d failed: %v", s.Path, lib.ID, err))
+		errs = append(errs, fmt.Sprintf("%s: %v", filePath, err))
 	}
-	return 0, false
+	return 0, fmt.Errorf("%s", strings.Join(errs, "; "))
 }
 
-// libraryFilePath maps a Subsonic song path (relative to the library root) to
-// the plugin's read-only WASI mount for that library.
-func libraryFilePath(lib host.Library, songPath string) string {
-	base := lib.MountPoint
-	if base == "" {
-		base = fmt.Sprintf("/libraries/%d", lib.ID)
+// logLibraryMounts records each library's WASI mount and whether it is
+// readable, to make path mapping problems obvious in the logs.
+func logLibraryMounts(libs []host.Library) {
+	for _, lib := range libs {
+		mount := libraryMount(lib)
+		entries, err := os.ReadDir(mount)
+		if err != nil {
+			pdk.Log(pdk.LogWarn, fmt.Sprintf("Library %d (%s): mount %s not readable: %v", lib.ID, lib.Name, mount, err))
+		} else {
+			pdk.Log(pdk.LogInfo, fmt.Sprintf("Library %d (%s): mounted at %s (%d entries)", lib.ID, lib.Name, mount, len(entries)))
+		}
 	}
+}
+
+func libraryMount(lib host.Library) string {
+	if lib.MountPoint != "" {
+		return lib.MountPoint
+	}
+	return fmt.Sprintf("/libraries/%d", lib.ID)
+}
+
+// libraryFilePath maps a Subsonic song path to the plugin's read-only WASI
+// mount for that library. Paths may be relative to the library root or
+// absolute (when the player has "Report Real Path" enabled).
+func libraryFilePath(lib host.Library, songPath string) string {
 	if lib.Path != "" && strings.HasPrefix(songPath, lib.Path) {
 		songPath = strings.TrimPrefix(songPath, lib.Path)
 	}
-	return path.Join(base, songPath)
+	return path.Join(libraryMount(lib), songPath)
 }
 
 // --- Subsonic API ---

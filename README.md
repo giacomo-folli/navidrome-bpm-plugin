@@ -32,6 +32,16 @@ running scan is a no-op.
 3. Restart or rescan plugins in Navidrome.
 4. Enable the plugin via the Navidrome Admin UI.
 
+## Troubleshooting
+
+**All songs fail to analyze (`BPM scan complete: 0 analyzed, N failed`)**: by
+default Navidrome's Subsonic API reports *fake* paths built from tags, which
+never match the real files. Enable **Report Real Path** for the plugin's player
+(Settings → Players → `navidrome-bpm-plugin`), or set
+`ND_SUBSONIC_DEFAULTREPORTREALPATH=true` and delete the plugin's player entry so
+it re-registers with the new default. The scan logs each library's mount and the
+first few per-song errors at `warn` level to help diagnose path issues.
+
 ## Build from Source
 
 You must have [TinyGo](https://tinygo.org/) and `zip` installed.
