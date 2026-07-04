@@ -79,16 +79,16 @@ func TestPlaylistSyncAddSong(t *testing.T) {
 	host.SubsonicAPIMock.ExpectedCalls = nil
 	host.SubsonicAPIMock.Calls = nil
 
-	host.SubsonicAPIMock.On("Call", "getPlaylists").Return(
+	host.SubsonicAPIMock.On("Call", "getPlaylists?u=admin").Return(
 		`{"subsonic-response":{"status":"ok","playlists":{"playlist":[{"id":"pl1","name":"BPM 120-129"}]}}}`, nil).Once()
-	host.SubsonicAPIMock.On("Call", "updatePlaylist?playlistId=pl1&songIdToAdd=song1").Return(
+	host.SubsonicAPIMock.On("Call", "updatePlaylist?playlistId=pl1&songIdToAdd=song1&u=admin").Return(
 		`{"subsonic-response":{"status":"ok"}}`, nil).Once()
-	host.SubsonicAPIMock.On("Call", "createPlaylist?name=BPM+90-99&songId=song2").Return(
+	host.SubsonicAPIMock.On("Call", "createPlaylist?name=BPM+90-99&songId=song2&u=admin").Return(
 		`{"subsonic-response":{"status":"ok","playlist":{"id":"pl2","name":"BPM 90-99"}}}`, nil).Once()
-	host.SubsonicAPIMock.On("Call", "updatePlaylist?playlistId=pl2&songIdToAdd=song3").Return(
+	host.SubsonicAPIMock.On("Call", "updatePlaylist?playlistId=pl2&songIdToAdd=song3&u=admin").Return(
 		`{"subsonic-response":{"status":"ok"}}`, nil).Once()
 
-	sync := &playlistSync{}
+	sync := &playlistSync{client: &subsonicClient{user: "admin"}}
 	// Existing playlist -> update.
 	if err := sync.addSong("song1", 124.3); err != nil {
 		t.Fatalf("addSong(song1): %v", err)

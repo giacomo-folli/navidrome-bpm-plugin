@@ -31,12 +31,16 @@ func init() {
 }
 
 func (p *bpmPlugin) OnInit() error {
-	interval, ok := host.ConfigGetInt("scan_interval_hours")
-	if !ok || interval <= 0 {
-		interval = 24
+	spec := ""
+	if minutes, ok := host.ConfigGetInt("scan_interval_minutes"); ok && minutes > 0 {
+		spec = fmt.Sprintf("@every %dm", minutes)
+	} else {
+		hours, ok := host.ConfigGetInt("scan_interval_hours")
+		if !ok || hours <= 0 {
+			hours = 24
+		}
+		spec = fmt.Sprintf("@every %dh", hours)
 	}
-
-	spec := fmt.Sprintf("@every %dh", interval)
 	if _, err := host.SchedulerScheduleRecurring(spec, scanScheduleID, scanScheduleID); err != nil {
 		return fmt.Errorf("failed to schedule BPM scan: %w", err)
 	}
@@ -101,16 +105,21 @@ func runScan() error {
 		return nil
 	}
 
-	albums, err := fetchAllAlbums()
+	client, err := newSubsonicClient()
+	if err != nil {
+		return err
+	}
+
+	albums, err := client.fetchAllAlbums()
 	if err != nil {
 		return err
 	}
 	pdk.Log(pdk.LogInfo, fmt.Sprintf("Found %d albums to scan.", len(albums)))
 
-	sync := &playlistSync{}
+	sync := &playlistSync{client: client}
 	analyzed, failed := 0, 0
 	for _, alb := range albums {
-		songs, err := fetchAlbumSongs(alb.ID)
+		songs, err := client.fetchAlbumSongs(alb.ID)
 		if err != nil {
 			pdk.Log(pdk.LogError, fmt.Sprintf("Failed to fetch album %s: %v", alb.ID, err))
 			continue
@@ -211,8 +220,32 @@ type playlist struct {
 	Name string `json:"name"`
 }
 
-func subsonicCall(uri string) (*subsonicResponse, error) {
-	respJSON, err := host.SubsonicAPICall(uri)
+// subsonicClient appends the required u=<username> parameter to every call.
+// The username must be one the admin authorized for this plugin in the UI.
+type subsonicClient struct {
+	user string
+}
+
+func newSubsonicClient() (*subsonicClient, error) {
+	users, err := host.UsersGetAdmins()
+	if err != nil || len(users) == 0 {
+		users, err = host.UsersGetUsers()
+		if err != nil {
+			return nil, fmt.Errorf("failed to list authorized users: %w", err)
+		}
+	}
+	if len(users) == 0 {
+		return nil, fmt.Errorf("no users authorized for this plugin; grant access in the plugin settings")
+	}
+	return &subsonicClient{user: users[0].UserName}, nil
+}
+
+func (c *subsonicClient) call(uri string) (*subsonicResponse, error) {
+	sep := "?"
+	if strings.Contains(uri, "?") {
+		sep = "&"
+	}
+	respJSON, err := host.SubsonicAPICall(uri + sep + "u=" + url.QueryEscape(c.user))
 	if err != nil {
 		return nil, err
 	}
@@ -227,12 +260,12 @@ func subsonicCall(uri string) (*subsonicResponse, error) {
 	return &sr, nil
 }
 
-func fetchAllAlbums() ([]album, error) {
+func (c *subsonicClient) fetchAllAlbums() ([]album, error) {
 	var all []album
 	const size = 500
 	for offset := 0; ; offset += size {
 		uri := fmt.Sprintf("getAlbumList2?type=alphabeticalByName&size=%d&offset=%d", size, offset)
-		sr, err := subsonicCall(uri)
+		sr, err := c.call(uri)
 		if err != nil {
 			return nil, fmt.Errorf("failed to fetch albums: %w", err)
 		}
@@ -244,8 +277,8 @@ func fetchAllAlbums() ([]album, error) {
 	}
 }
 
-func fetchAlbumSongs(albumID string) ([]song, error) {
-	sr, err := subsonicCall("getAlbum?id=" + url.QueryEscape(albumID))
+func (c *subsonicClient) fetchAlbumSongs(albumID string) ([]song, error) {
+	sr, err := c.call("getAlbum?id=" + url.QueryEscape(albumID))
 	if err != nil {
 		return nil, err
 	}
@@ -258,6 +291,7 @@ func fetchAlbumSongs(albumID string) ([]song, error) {
 // which is how the plugin exposes BPM values (the library filesystem is
 // read-only, so tags cannot be written).
 type playlistSync struct {
+	client *subsonicClient
 	byName map[string]string // playlist name -> ID, loaded lazily per scan
 }
 
@@ -277,13 +311,13 @@ func (p *playlistSync) addSong(songID string, tempo float64) error {
 	if id, ok := p.byName[name]; ok {
 		uri := fmt.Sprintf("updatePlaylist?playlistId=%s&songIdToAdd=%s",
 			url.QueryEscape(id), url.QueryEscape(songID))
-		_, err := subsonicCall(uri)
+		_, err := p.client.call(uri)
 		return err
 	}
 
 	uri := fmt.Sprintf("createPlaylist?name=%s&songId=%s",
 		url.QueryEscape(name), url.QueryEscape(songID))
-	sr, err := subsonicCall(uri)
+	sr, err := p.client.call(uri)
 	if err != nil {
 		return err
 	}
@@ -298,7 +332,7 @@ func (p *playlistSync) addSong(songID string, tempo float64) error {
 }
 
 func (p *playlistSync) load() error {
-	sr, err := subsonicCall("getPlaylists")
+	sr, err := p.client.call("getPlaylists")
 	if err != nil {
 		return fmt.Errorf("failed to fetch playlists: %w", err)
 	}
