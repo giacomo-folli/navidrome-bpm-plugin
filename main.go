@@ -26,8 +26,10 @@ const (
 	kvScanStats   = "scan:stats"
 
 	// Navidrome kills any plugin call after 30s, so each batch stops
-	// analyzing after this budget and chains a follow-up one-time task.
-	batchTimeBudget = 15 * time.Second
+	// analyzing after this budget and chains a follow-up one-time task. It is
+	// checked between songs, so the worst case is budget + one full song
+	// analysis; keep it low enough that this stays under 30s.
+	batchTimeBudget = 10 * time.Second
 	// scanLockTTL only needs to outlive the gap between chained batches; if a
 	// batch is killed, the lock expires and the next scan resumes the queue.
 	scanLockTTL = 180
@@ -245,18 +247,20 @@ func processSong(libs []host.Library, sync *playlistSync, s song, stats *scanSta
 	}
 	host.KVStoreSetWithTTL(pendingKey, []byte("1"), pendingTTL)
 
+	start := time.Now()
 	tempo, err := analyzeSong(libs, s)
+	elapsed := time.Since(start).Round(100 * time.Millisecond)
 	host.KVStoreDelete(pendingKey)
 	if err != nil {
 		stats.Failed++
 		if stats.Failed <= maxFailureWarnings {
-			pdk.Log(pdk.LogWarn, fmt.Sprintf("Failed to analyze %q: %v", s.Path, err))
+			pdk.Log(pdk.LogWarn, fmt.Sprintf("Failed to analyze %q (%s): %v", s.Path, elapsed, err))
 		}
 		host.KVStoreSet(cacheKey, []byte("failed"))
 		return
 	}
 	stats.Analyzed++
-	pdk.Log(pdk.LogInfo, fmt.Sprintf("Analyzed %s: %.1f BPM", s.Title, tempo))
+	pdk.Log(pdk.LogInfo, fmt.Sprintf("Analyzed %s: %.1f BPM (%s)", s.Title, tempo, elapsed))
 
 	if err := host.KVStoreSet(cacheKey, []byte(fmt.Sprintf("%.1f", tempo))); err != nil {
 		pdk.Log(pdk.LogError, fmt.Sprintf("Failed to store BPM for %s: %v", s.ID, err))

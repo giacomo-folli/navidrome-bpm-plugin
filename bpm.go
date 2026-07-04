@@ -27,8 +27,9 @@ const (
 	minAudioSeconds = 10.0
 	// maxAudioSeconds caps how much audio is decoded per song: enough for a
 	// stable tempo estimate while keeping each analysis well inside
-	// Navidrome's 30s plugin-call timeout.
-	maxAudioSeconds = 120.0
+	// Navidrome's 30s plugin-call timeout (Wasm decoding is roughly an order
+	// of magnitude slower than native).
+	maxAudioSeconds = 30.0
 )
 
 func detectBPM(filePath string) (float64, error) {
