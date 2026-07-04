@@ -1,6 +1,6 @@
 .PHONY: test build run
 
-GO_ENV = GOCACHE=/tmp/navidrome-bpm-gocache GOMODCACHE=/tmp/navidrome-bpm-gomodcache
+GO_ENV = CGO_ENABLED=1 GOCACHE=/tmp/navidrome-bpm-gocache GOMODCACHE=/tmp/navidrome-bpm-gomodcache
 
 test:
 	$(GO_ENV) go test ./...
