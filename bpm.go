@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -39,7 +40,11 @@ func detectBPM(filePath string) (float64, error) {
 	}
 	defer file.Close()
 
-	return detectBPMFromMP3(file)
+	// Hide the file's io.Seeker: go-mp3 otherwise pre-scans every frame of the
+	// whole file with tiny unbuffered reads to build a seek table, which in the
+	// Wasm sandbox costs one hosted WASI call each and can alone exceed
+	// Navidrome's 30s plugin-call deadline.
+	return detectBPMFromMP3(bufio.NewReaderSize(file, 64*1024))
 }
 
 func detectBPMFromMP3(r io.Reader) (float64, error) {
