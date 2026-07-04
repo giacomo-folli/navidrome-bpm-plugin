@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
+	"unicode"
 
 	"github.com/giacomo-folli/navidrome-bpm-plugin/internal/api"
 )
@@ -61,7 +63,7 @@ func (s *Scanner) Tracks(ctx context.Context) ([]Track, error) {
 					s.logger.Warn("skipping song without path", "song_id", song.ID, "title", song.Title)
 					continue
 				}
-				resolvedPath, info, usedFallback, err := statResolvedPath(path)
+				resolvedPath, info, usedFallback, err := statResolvedPath(path, song.Title)
 				if err != nil {
 					missingFiles++
 					s.logger.Warn("skipping missing or inaccessible music file", "song_id", song.ID, "title", song.Title, "navidrome_path", song.Path, "resolved_path", path, "error", err)
@@ -111,21 +113,27 @@ func startsWithDotDot(path string) bool {
 
 var trackPrefixPattern = regexp.MustCompile(`^\d+(?:-\d+)? - (.+)$`)
 
-func statResolvedPath(path string) (string, os.FileInfo, bool, error) {
+func statResolvedPath(path, title string) (string, os.FileInfo, bool, error) {
+	// Strategy 1: exact path.
 	info, err := os.Stat(path)
 	if err == nil {
 		return path, info, false, nil
 	}
 
-	fallback := stripTrackPrefixPath(path)
-	if fallback == path {
-		return path, nil, false, err
+	// Strategy 2: strip track-number prefix (e.g. "01-04 - Song.mp3" → "Song.mp3").
+	stripped := stripTrackPrefixPath(path)
+	if stripped != path {
+		if sinfo, serr := os.Stat(stripped); serr == nil {
+			return stripped, sinfo, true, nil
+		}
 	}
-	fallbackInfo, fallbackErr := os.Stat(fallback)
-	if fallbackErr != nil {
-		return path, nil, false, err
+
+	// Strategy 3: fuzzy match inside the parent directory.
+	if match, minfo, ok := dirFuzzyMatch(path, title); ok {
+		return match, minfo, true, nil
 	}
-	return fallback, fallbackInfo, true, nil
+
+	return path, nil, false, err
 }
 
 func stripTrackPrefixPath(path string) string {
@@ -136,4 +144,140 @@ func stripTrackPrefixPath(path string) string {
 		return path
 	}
 	return filepath.Join(dir, matches[1])
+}
+
+// dirFuzzyMatch lists the parent directory and attempts to find the best
+// matching file using progressively fuzzier strategies:
+//  1. Case-insensitive exact match on the full filename.
+//  2. Normalised match (lowercase, punctuation stripped).
+//  3. Best Jaccard word-overlap score (using both filename and song title).
+func dirFuzzyMatch(path, title string) (string, os.FileInfo, bool) {
+	dir := filepath.Dir(path)
+	ext := strings.ToLower(filepath.Ext(path))
+	wantBase := stripExt(filepath.Base(path))
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return "", nil, false
+	}
+
+	type candidate struct {
+		fullPath string
+		base     string // filename without extension
+		info     os.FileInfo
+	}
+	var candidates []candidate
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if !strings.EqualFold(filepath.Ext(name), ext) {
+			continue
+		}
+		fi, ierr := e.Info()
+		if ierr != nil {
+			continue
+		}
+		candidates = append(candidates, candidate{
+			fullPath: filepath.Join(dir, name),
+			base:     stripExt(name),
+			info:     fi,
+		})
+	}
+	if len(candidates) == 0 {
+		return "", nil, false
+	}
+
+	// Pass 1: case-insensitive exact match.
+	for _, c := range candidates {
+		if strings.EqualFold(c.base, wantBase) {
+			return c.fullPath, c.info, true
+		}
+	}
+
+	// Pass 2: normalised match (ignore punctuation / special characters).
+	normWant := normalizeForMatch(wantBase)
+	for _, c := range candidates {
+		if normalizeForMatch(c.base) == normWant {
+			return c.fullPath, c.info, true
+		}
+	}
+
+	// Pass 3: best fuzzy match by Jaccard word overlap.
+	normTitle := normalizeForMatch(title)
+	var bestPath string
+	var bestInfo os.FileInfo
+	var bestScore float64
+	for _, c := range candidates {
+		normC := normalizeForMatch(c.base)
+		score := wordOverlap(normWant, normC)
+		if normTitle != "" {
+			if ts := wordOverlap(normTitle, normC); ts > score {
+				score = ts
+			}
+		}
+		if score > bestScore {
+			bestScore = score
+			bestPath = c.fullPath
+			bestInfo = c.info
+		}
+	}
+	const minScore = 0.5
+	if bestScore >= minScore && bestInfo != nil {
+		return bestPath, bestInfo, true
+	}
+	return "", nil, false
+}
+
+// --------------- helpers ---------------
+
+func stripExt(name string) string {
+	return strings.TrimSuffix(name, filepath.Ext(name))
+}
+
+// normalizeForMatch lowercases the string and replaces every non-letter,
+// non-digit character with a space, then collapses runs of whitespace.
+func normalizeForMatch(s string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(s) {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) || r == ' ' {
+			b.WriteRune(r)
+		} else {
+			b.WriteRune(' ')
+		}
+	}
+	return strings.Join(strings.Fields(b.String()), " ")
+}
+
+// wordOverlap returns the Jaccard similarity (0..1) of the word sets
+// extracted from two normalised strings.
+func wordOverlap(a, b string) float64 {
+	wa := strings.Fields(a)
+	wb := strings.Fields(b)
+	if len(wa) == 0 && len(wb) == 0 {
+		return 1
+	}
+	if len(wa) == 0 || len(wb) == 0 {
+		return 0
+	}
+	setA := make(map[string]bool, len(wa))
+	for _, w := range wa {
+		setA[w] = true
+	}
+	setB := make(map[string]bool, len(wb))
+	for _, w := range wb {
+		setB[w] = true
+	}
+	intersection := 0
+	for w := range setA {
+		if setB[w] {
+			intersection++
+		}
+	}
+	union := len(setA) + len(setB) - intersection
+	if union == 0 {
+		return 0
+	}
+	return float64(intersection) / float64(union)
 }
