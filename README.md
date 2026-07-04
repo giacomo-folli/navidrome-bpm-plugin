@@ -1,63 +1,27 @@
 # Navidrome BPM Plugin
 
-Community companion service for Navidrome that analyzes local music files, caches BPM results, and synchronizes Navidrome playlists named by BPM bucket such as `060bpm`, `120bpm`, and `220bpm`.
-
-The scanner intentionally uses paginated `getAlbumList2` plus `getAlbum` calls. It does not use `getIndexes`, because Navidrome returns artists from that endpoint, not a complete song list.
+A native WebAssembly plugin for Navidrome that analyzes local music files, detects their BPM using a pure-Go implementation, and categorizes them into playlists.
 
 ## Features
 
-- Connects to Navidrome through the OpenSubsonic API.
-- Enumerates large libraries with album pagination.
-- Detects BPM with aubio.
-- Caches results in SQLite by file path and modification time.
-- Synchronizes BPM bucket playlists idempotently.
-- Optionally writes BPM metadata with FFmpeg.
-- Runs once or continuously on a configurable interval.
+- **Native Navidrome Plugin**: Runs entirely within Navidrome's secure WebAssembly sandbox (Extism). No external daemons, docker containers, or API polling required.
+- **Pure-Go BPM Detection**: Uses `go-mp3` and `benjojo/bpm` to decode and analyze MP3s in-memory without relying on host system binaries like `aubio`.
+- **Zero Configuration Setup**: Configure the scan interval and target playlist names directly from the Navidrome Web UI.
+- **Efficient Caching**: Remembers analyzed files using Navidrome's native `KVStore` host service.
 
-## Configuration
+## Installation
 
-Copy `config/config.example.yaml` to `config/config.yaml` and edit it:
+1. Download the latest `navidrome-bpm-plugin.ndp` release (or build it yourself).
+2. Place the `.ndp` file into your Navidrome `plugins/` directory.
+3. Restart or rescan plugins in Navidrome.
+4. Enable the plugin via the Navidrome Admin UI.
 
-```yaml
-navidrome:
-  url: http://localhost:4533
-  username: admin
-  password: password
+## Build from Source
 
-musicDir: /music
-navidromeMusicDir: /music
-
-analysis:
-  workers: 6
-
-playlist:
-  bucketSize: 10
-  minimum: 60
-  maximum: 220
-
-scan:
-  interval: 30m
-
-metadata:
-  writeTags: false
-```
-
-Environment variables use the `NBDPM_` prefix, for example `NBDPM_NAVIDROME_URL`.
-
-## Run
+You must have [TinyGo](https://tinygo.org/) and `zip` installed.
 
 ```bash
-go run ./cmd/navidrome-bpm-plugin
+make build
 ```
 
-For a single run, set `scan.interval` to `0s`.
-
-## Docker
-
-```bash
-docker compose up --build
-```
-
-Mount `/music` to the same library root Navidrome uses, and mount `/config` for `config.yaml` and the SQLite cache.
-
-When running on the host with `make run`, set `musicDir` to the host path that contains the same files. Leave `navidromeMusicDir` as the path Navidrome reports through the API, usually `/music`.
+This will produce a `navidrome-bpm-plugin.ndp` archive in the project root, which you can drop into Navidrome.

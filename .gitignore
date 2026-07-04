@@ -1,3 +1,2 @@
-config.yaml
-cache.sqlite
-.env
+*.wasm
+*.ndp

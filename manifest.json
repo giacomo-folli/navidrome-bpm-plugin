@@ -1,0 +1,42 @@
+{
+  "name": "BPM Detector",
+  "author": "Giacomo Folli (Ported by Codex)",
+  "version": "2.0.0",
+  "description": "Analyzes audio files to detect BPM and saves the value to tags or playlists.",
+  "permissions": {
+    "library": {
+      "reason": "Access library metadata and files to read audio for BPM analysis",
+      "filesystem": true
+    },
+    "kvstore": {
+      "reason": "Track which songs have already been analyzed"
+    },
+    "subsonicapi": {
+      "reason": "Create and update playlists containing BPM metadata"
+    },
+    "users": {
+      "reason": "Access user information for SubsonicAPI authorization"
+    },
+    "scheduler": {
+      "reason": "Run periodic scans of the library for new unanalyzed tracks"
+    }
+  },
+  "config": {
+    "schema": {
+      "type": "object",
+      "properties": {
+        "scan_interval_hours": {
+          "type": "integer",
+          "title": "Scan Interval (Hours)",
+          "default": 24,
+          "description": "How often to scan the library for new tracks to analyze."
+        },
+        "target_playlist": {
+          "type": "string",
+          "title": "Target Playlist Name",
+          "default": "Analyzed BPMs"
+        }
+      }
+    }
+  }
+}
