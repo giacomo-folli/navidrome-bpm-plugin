@@ -30,18 +30,22 @@ const (
 	scanSteps   = 1024
 	scanSamples = 512
 
-	minAudioSeconds = 10.0
-	// maxAudioSeconds caps how much audio is decoded per song: enough for a
-	// stable tempo estimate while keeping each analysis well inside
-	// Navidrome's 30s plugin-call timeout. Decoding dominates analysis cost
-	// (~3x the tempo scan natively) and Wasm on a weak host CPU can be more
-	// than an order of magnitude slower than that.
-	maxAudioSeconds = 15.0
+	minAudioSeconds = 3.0
+	// maxAudioSeconds caps how much audio is decoded per song. Decoding
+	// dominates analysis cost (~3x the tempo scan natively) and Wasm on a
+	// weak host CPU can be more than an order of magnitude slower than that,
+	// so this is kept small enough that a song decodes in a few seconds even
+	// in the worst observed environments; the tempo estimate is less stable
+	// than with 15s of audio, but a batch must fit well inside Navidrome's
+	// 30s plugin-call timeout.
+	maxAudioSeconds = 5.0
 
 	// analysisSoftDeadline aborts a song's decode before Navidrome's 30s hard
 	// kill, so the song is recorded as failed (with timing details) and the
-	// scan keeps going instead of the whole module being torn down.
-	analysisSoftDeadline = 20 * time.Second
+	// scan keeps going instead of the whole module being torn down. It must
+	// stay under 30s minus batchTimeBudget (see main.go) with room for the
+	// Subsonic calls around the analysis.
+	analysisSoftDeadline = 10 * time.Second
 )
 
 func detectBPM(filePath string) (float64, error) {
@@ -75,7 +79,10 @@ func detectBPMFromMP3(r io.Reader) (float64, error) {
 	// data in memory (the Wasm sandbox has a limited heap).
 	decodeStart := time.Now()
 	deadline := decodeStart.Add(analysisSoftDeadline)
-	buf := make([]byte, 32*1024)
+	// Keep the buffer small (~2 MP3 frames of PCM) so each Read decodes only
+	// a sliver of audio and the deadline check above it runs often; Wasm has
+	// no preemption, so a large Read could blow past the deadline unchecked.
+	buf := make([]byte, 8*1024)
 	rem := 0
 	for len(acc.nrg) < maxEnergySamples {
 		if time.Now().After(deadline) {
