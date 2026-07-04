@@ -3,6 +3,7 @@ package scanner
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 
@@ -25,33 +26,45 @@ type Scanner struct {
 	api               API
 	musicDir          string
 	navidromeMusicDir string
+	logger            *slog.Logger
 	pageSize          int
 }
 
-func New(api API, musicDir, navidromeMusicDir string) *Scanner {
-	return &Scanner{api: api, musicDir: musicDir, navidromeMusicDir: navidromeMusicDir, pageSize: 500}
+func New(api API, musicDir, navidromeMusicDir string, logger *slog.Logger) *Scanner {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &Scanner{api: api, musicDir: musicDir, navidromeMusicDir: navidromeMusicDir, logger: logger, pageSize: 500}
 }
 
 func (s *Scanner) Tracks(ctx context.Context) ([]Track, error) {
 	var tracks []Track
+	totalSongs := 0
+	missingFiles := 0
 	for offset := 0; ; offset += s.pageSize {
 		albums, err := s.api.Albums(ctx, offset, s.pageSize)
 		if err != nil {
 			return nil, err
 		}
+		s.logger.Info("loaded album page", "offset", offset, "albums", len(albums))
 		for _, summary := range albums {
 			album, err := s.api.Album(ctx, summary.ID)
 			if err != nil {
 				return nil, err
 			}
 			for _, song := range album.Songs {
+				totalSongs++
 				path := resolvePath(s.musicDir, s.navidromeMusicDir, song.Path)
 				if path == "" {
-					return nil, fmt.Errorf("song %q has no path; Navidrome must expose paths for local analysis", song.ID)
+					missingFiles++
+					s.logger.Warn("skipping song without path", "song_id", song.ID, "title", song.Title)
+					continue
 				}
 				info, err := os.Stat(path)
 				if err != nil {
-					return nil, fmt.Errorf("stat resolved music path %q from Navidrome path %q: %w; set musicDir to the local host library root and navidromeMusicDir to the path Navidrome reports, usually /music", path, song.Path, err)
+					missingFiles++
+					s.logger.Warn("skipping missing or inaccessible music file", "song_id", song.ID, "title", song.Title, "navidrome_path", song.Path, "resolved_path", path, "error", err)
+					continue
 				}
 				tracks = append(tracks, Track{
 					ID:       song.ID,
@@ -65,6 +78,10 @@ func (s *Scanner) Tracks(ctx context.Context) ([]Track, error) {
 			break
 		}
 	}
+	if totalSongs > 0 && len(tracks) == 0 {
+		return nil, fmt.Errorf("no local music files were found for %d Navidrome songs; set musicDir to the local host library root and navidromeMusicDir to the path Navidrome reports, usually /music", totalSongs)
+	}
+	s.logger.Info("library scan resolved local files", "navidrome_songs", totalSongs, "local_files", len(tracks), "skipped_missing", missingFiles)
 	return tracks, nil
 }
 

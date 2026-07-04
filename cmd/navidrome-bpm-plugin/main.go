@@ -37,7 +37,7 @@ func main() {
 
 	detector := bpm.NewDetector(cfg.Analysis.Detector)
 	tagWriter := metadata.NewWriter(cfg.Metadata.WriteTags)
-	libraryScanner := scanner.New(client, cfg.MusicDir, cfg.NavidromeMusicDir)
+	libraryScanner := scanner.New(client, cfg.MusicDir, cfg.NavidromeMusicDir, logger)
 	pool := worker.NewPool(cfg.Analysis.Workers, detector, store, tagWriter, logger)
 	syncer := playlist.NewSyncer(client, playlist.Options{
 		BucketSize:        cfg.Playlist.BucketSize,
