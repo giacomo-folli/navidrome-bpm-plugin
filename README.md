@@ -10,6 +10,7 @@ A native WebAssembly plugin for Navidrome that analyzes local music files, detec
 - **Zero Configuration Setup**: Configure the scan interval directly from the Navidrome Web UI.
 - **Efficient Caching**: Remembers analyzed files using Navidrome's native `KVStore` host service.
 - **Manual Trigger**: Set the "Trigger Scan Now" config field to any new value to start a scan on demand.
+- **Startup Scan**: A scan starts automatically ~10 seconds after the plugin loads, in addition to the recurring schedule.
 
 ## Triggering a Scan Manually
 

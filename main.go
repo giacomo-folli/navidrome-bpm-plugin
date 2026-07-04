@@ -16,9 +16,14 @@ import (
 )
 
 const (
-	scanScheduleID    = "bpm-scan"
-	triggerScheduleID = "bpm-trigger-check"
-	processScheduleID = "bpm-process"
+	scanScheduleID     = "bpm-scan"
+	initScanScheduleID = "bpm-init-scan"
+	triggerScheduleID  = "bpm-trigger-check"
+	processScheduleID  = "bpm-process"
+
+	// initScanDelay gives Navidrome time to finish loading before the
+	// startup scan begins.
+	initScanDelay = 10
 
 	kvLastTrigger = "trigger:last"
 	kvScanLock    = "scan:lock"
@@ -69,7 +74,13 @@ func (p *bpmPlugin) OnInit() error {
 	// lock left behind by a killed batch (its defer never ran).
 	host.KVStoreDelete(kvScanLock)
 
-	pdk.Log(pdk.LogInfo, fmt.Sprintf("BPM plugin initialized, scan scheduled %s", spec))
+	// Kick off a scan on plugin load. OnInit must stay short, so the scan is
+	// scheduled as a one-time task instead of running inline.
+	if _, err := host.SchedulerScheduleOneTime(initScanDelay, initScanScheduleID, initScanScheduleID); err != nil {
+		return fmt.Errorf("failed to schedule startup scan: %w", err)
+	}
+
+	pdk.Log(pdk.LogInfo, fmt.Sprintf("BPM plugin initialized, startup scan in %ds, recurring scan %s", initScanDelay, spec))
 	return nil
 }
 
@@ -81,7 +92,7 @@ func (p *bpmPlugin) OnCallback(req scheduler.SchedulerCallbackRequest) error {
 		}
 		pdk.Log(pdk.LogInfo, "Manual scan requested via trigger_scan config")
 		return startScan()
-	case scanScheduleID:
+	case scanScheduleID, initScanScheduleID:
 		return startScan()
 	case processScheduleID:
 		return processBatch()
