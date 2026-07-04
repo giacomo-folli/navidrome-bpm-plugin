@@ -7,9 +7,11 @@ import (
 	"io"
 	"math"
 	"os"
+	"time"
 
 	"github.com/benjojo/bpm"
 	mp3 "github.com/hajimehoshi/go-mp3"
+	"github.com/navidrome/navidrome/plugins/pdk/go/pdk"
 )
 
 const (
@@ -20,17 +22,26 @@ const (
 	// be rescaled when the source sample rate differs.
 	referenceRate = 44100.0
 
-	minBPM      = 60.0
-	maxBPM      = 200.0
-	scanSteps   = 2048 // bpm-tools defaults
-	scanSamples = 1024
+	minBPM = 60.0
+	maxBPM = 200.0
+	// Halved from the bpm-tools defaults (2048/1024): with only
+	// maxAudioSeconds of audio the scan stays accurate at a quarter of the
+	// cost, which matters under the Wasm slowdown.
+	scanSteps   = 1024
+	scanSamples = 512
 
 	minAudioSeconds = 10.0
 	// maxAudioSeconds caps how much audio is decoded per song: enough for a
 	// stable tempo estimate while keeping each analysis well inside
-	// Navidrome's 30s plugin-call timeout (Wasm decoding is roughly an order
-	// of magnitude slower than native).
-	maxAudioSeconds = 30.0
+	// Navidrome's 30s plugin-call timeout. Decoding dominates analysis cost
+	// (~3x the tempo scan natively) and Wasm on a weak host CPU can be more
+	// than an order of magnitude slower than that.
+	maxAudioSeconds = 15.0
+
+	// analysisSoftDeadline aborts a song's decode before Navidrome's 30s hard
+	// kill, so the song is recorded as failed (with timing details) and the
+	// scan keeps going instead of the whole module being torn down.
+	analysisSoftDeadline = 20 * time.Second
 )
 
 func detectBPM(filePath string) (float64, error) {
@@ -48,10 +59,12 @@ func detectBPM(filePath string) (float64, error) {
 }
 
 func detectBPMFromMP3(r io.Reader) (float64, error) {
+	initStart := time.Now()
 	decoder, err := mp3.NewDecoder(r)
 	if err != nil {
 		return 0, fmt.Errorf("failed to decode mp3: %w", err)
 	}
+	initElapsed := time.Since(initStart)
 
 	sampleRate := int(decoder.SampleRate())
 	maxEnergySamples := int(maxAudioSeconds * float64(sampleRate) / energyInterval)
@@ -60,9 +73,15 @@ func detectBPMFromMP3(r io.Reader) (float64, error) {
 	// go-mp3 always outputs 16-bit little-endian stereo at the source rate.
 	// Stream it through the energy accumulator so we never hold the full PCM
 	// data in memory (the Wasm sandbox has a limited heap).
+	decodeStart := time.Now()
+	deadline := decodeStart.Add(analysisSoftDeadline)
 	buf := make([]byte, 32*1024)
 	rem := 0
 	for len(acc.nrg) < maxEnergySamples {
+		if time.Now().After(deadline) {
+			return 0, fmt.Errorf("decode too slow: %.1fs of audio in %s (decoder init took %s)",
+				audioSeconds(len(acc.nrg), sampleRate), time.Since(decodeStart).Round(100*time.Millisecond), initElapsed.Round(time.Millisecond))
+		}
 		n, err := decoder.Read(buf[rem:])
 		total := rem + n
 		used := acc.feedStereoS16LE(buf[:total])
@@ -74,8 +93,19 @@ func detectBPMFromMP3(r io.Reader) (float64, error) {
 			return 0, fmt.Errorf("error reading mp3 data: %w", err)
 		}
 	}
+	decodeElapsed := time.Since(decodeStart)
 
-	return detectTempoFromEnergy(acc.nrg, sampleRate)
+	scanStart := time.Now()
+	tempo, err := detectTempoFromEnergy(acc.nrg, sampleRate)
+	pdk.Log(pdk.LogDebug, fmt.Sprintf("bpm timing: init=%s decode=%s (%.1fs audio) scan=%s",
+		initElapsed.Round(time.Millisecond), decodeElapsed.Round(time.Millisecond),
+		audioSeconds(len(acc.nrg), sampleRate), time.Since(scanStart).Round(time.Millisecond)))
+	return tempo, err
+}
+
+// audioSeconds converts an energy sample count back to seconds of audio.
+func audioSeconds(energySamples, sampleRate int) float64 {
+	return float64(energySamples) * energyInterval / float64(sampleRate)
 }
 
 // detectTempoFromEnergy scans an energy envelope (as produced by

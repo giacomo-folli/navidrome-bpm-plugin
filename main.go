@@ -33,8 +33,9 @@ const (
 	// Navidrome kills any plugin call after 30s, so each batch stops
 	// analyzing after this budget and chains a follow-up one-time task. It is
 	// checked between songs, so the worst case is budget + one full song
-	// analysis; keep it low enough that this stays under 30s.
-	batchTimeBudget = 10 * time.Second
+	// analysis (bounded by analysisSoftDeadline); keep budget + deadline
+	// under 30s with room for the Subsonic calls around them.
+	batchTimeBudget = 5 * time.Second
 	// scanLockTTL only needs to outlive the gap between chained batches; if a
 	// batch is killed, the lock expires and the next scan resumes the queue.
 	scanLockTTL = 180
