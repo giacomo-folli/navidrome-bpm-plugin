@@ -130,12 +130,23 @@ func detectTempoFromEnergy(nrg []float32, sampleRate int) (float64, error) {
 		return 0, fmt.Errorf("not enough audio to analyze (%d energy samples)", len(nrg))
 	}
 
-	detected := bpm.ScanForBpm(nrg, minBPM, maxBPM, scanSteps, scanSamples)
-	// benjojo/bpm assumes 44100Hz input; rescale for the actual rate.
-	detected *= float64(sampleRate) / referenceRate
+	// benjojo/bpm assumes 44100Hz input, so the scan bounds must be expressed
+	// in that frame and the result scaled back; passing real-world bounds
+	// shifts the effective range with the file's sample rate (65-218 BPM for
+	// 48kHz files) and puts part of it beyond maxBPM.
+	ratio := float64(sampleRate) / referenceRate
+	detected := bpm.ScanForBpm(nrg, minBPM/ratio, maxBPM/ratio, scanSteps, scanSamples) * ratio
 
 	if math.IsNaN(detected) || detected < minBPM || detected > maxBPM {
 		return 0, fmt.Errorf("no plausible tempo found (got %.1f)", detected)
+	}
+	// The scan returns the autodifference trough even when the envelope has no
+	// periodicity at all (e.g. only a beatless intro was decoded), and such
+	// degenerate troughs sit at the edge of the scanned range. A result within
+	// 2% of a bound is overwhelmingly more likely to be that artifact than a
+	// song at exactly the range limit.
+	if detected <= minBPM*1.02 || detected >= maxBPM*0.98 {
+		return 0, fmt.Errorf("tempo scan pinned at range edge (%.1f), audio likely has no steady beat", detected)
 	}
 	return detected, nil
 }
