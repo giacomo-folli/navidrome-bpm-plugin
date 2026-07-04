@@ -10,7 +10,6 @@ cache:
   path: /config/cache.sqlite
 
 analysis:
-  detector: essentia
   workers: 6
 
 playlist:

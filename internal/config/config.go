@@ -20,8 +20,7 @@ type Config struct {
 		Path string
 	}
 	Analysis struct {
-		Detector string
-		Workers  int
+		Workers int
 	}
 	Playlist struct {
 		BucketSize        int
@@ -52,7 +51,6 @@ func Load() (Config, error) {
 
 	v.SetDefault("cache.path", "/config/cache.sqlite")
 	v.SetDefault("navidromeMusicDir", "/music")
-	v.SetDefault("analysis.detector", "essentia")
 	v.SetDefault("analysis.workers", 6)
 	v.SetDefault("playlist.bucketSize", 10)
 	v.SetDefault("playlist.minimum", 60)
@@ -70,7 +68,6 @@ func Load() (Config, error) {
 		"musicDir",
 		"navidromeMusicDir",
 		"cache.path",
-		"analysis.detector",
 		"analysis.workers",
 		"playlist.bucketSize",
 		"playlist.minimum",

@@ -35,7 +35,8 @@ func main() {
 	}
 	defer store.Close()
 
-	detector := bpm.NewDetector(cfg.Analysis.Detector)
+	detector := bpm.NewDetector()
+	logger.Info("configured BPM detector", "detector", detector.Name(), "available", bpm.Availability())
 	tagWriter := metadata.NewWriter(cfg.Metadata.WriteTags)
 	libraryScanner := scanner.New(client, cfg.MusicDir, cfg.NavidromeMusicDir, logger)
 	pool := worker.NewPool(cfg.Analysis.Workers, detector, store, tagWriter, logger)

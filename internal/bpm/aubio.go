@@ -10,6 +10,10 @@ import (
 
 type Aubio struct{}
 
+func (Aubio) Name() string {
+	return "aubio"
+}
+
 func (Aubio) Detect(path string) (float64, error) {
 	cmd := exec.Command("aubiotrack", "-i", path)
 	out, err := cmd.Output()

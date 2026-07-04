@@ -7,7 +7,7 @@ RUN CGO_ENABLED=1 go build -buildvcs=false -o /out/navidrome-bpm-plugin ./cmd/na
 
 FROM debian:bookworm-slim
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates ffmpeg aubio-tools essentia \
+    && apt-get install -y --no-install-recommends ca-certificates ffmpeg aubio-tools \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /out/navidrome-bpm-plugin /usr/local/bin/navidrome-bpm-plugin
 VOLUME ["/music", "/config"]

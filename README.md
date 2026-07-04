@@ -8,7 +8,7 @@ The scanner intentionally uses paginated `getAlbumList2` plus `getAlbum` calls. 
 
 - Connects to Navidrome through the OpenSubsonic API.
 - Enumerates large libraries with album pagination.
-- Detects BPM with Essentia, with aubio available as an alternate backend.
+- Detects BPM with aubio.
 - Caches results in SQLite by file path and modification time.
 - Synchronizes BPM bucket playlists idempotently.
 - Optionally writes BPM metadata with FFmpeg.
@@ -28,7 +28,6 @@ musicDir: /music
 navidromeMusicDir: /music
 
 analysis:
-  detector: essentia
   workers: 6
 
 playlist:
