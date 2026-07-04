@@ -7,13 +7,8 @@ services:
     volumes:
       - ./config:/config
       - /DATA/Media/Music:/music:ro
-    environment:
-      NBDPM_NAVIDROME_URL: http://navidrome:4533
-      NBDPM_NAVIDROME_USERNAME: washbasin6779
-      NBDPM_NAVIDROME_PASSWORD: OoGPC9mvB80Zfa
-      NBDPM_MUSICDIR: /music
-      NBDPM_NAVIDROME_MUSICDIR: /music
-      NBDPM_CACHE_PATH: /config/cache.sqlite
+    env_file:
+      - .env
     networks:
       - navidrome_default
 
