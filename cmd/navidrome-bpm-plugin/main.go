@@ -46,7 +46,7 @@ func main() {
 		DeleteEmpty:       cfg.Playlist.DeleteEmpty,
 		RescanAfterTags:   cfg.Metadata.RescanAfterWrite,
 		IncludeOutOfRange: cfg.Playlist.IncludeOutOfRange,
-	})
+	}, logger)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
