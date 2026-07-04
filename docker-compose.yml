@@ -1,0 +1,11 @@
+services:
+  navidrome-bpm-plugin:
+    build: .
+    restart: unless-stopped
+    volumes:
+      - ./config:/config
+      - /path/to/music:/music:rw
+    environment:
+      NBDPM_NAVIDROME_URL: http://navidrome:4533
+      NBDPM_NAVIDROME_USERNAME: admin
+      NBDPM_NAVIDROME_PASSWORD: password

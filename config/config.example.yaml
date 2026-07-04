@@ -1,0 +1,27 @@
+navidrome:
+  url: http://localhost:4533
+  username: admin
+  password: password
+
+musicDir: /music
+
+cache:
+  path: /config/cache.sqlite
+
+analysis:
+  detector: essentia
+  workers: 6
+
+playlist:
+  bucketSize: 10
+  minimum: 60
+  maximum: 220
+  deleteEmpty: false
+  includeOutOfRange: false
+
+scan:
+  interval: 30m
+
+metadata:
+  writeTags: false
+  rescanAfterWrite: false
