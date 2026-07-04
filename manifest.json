@@ -30,11 +30,6 @@
           "title": "Scan Interval (Hours)",
           "default": 24,
           "description": "How often to scan the library for new tracks to analyze."
-        },
-        "target_playlist": {
-          "type": "string",
-          "title": "Target Playlist Name",
-          "default": "Analyzed BPMs"
         }
       }
     }

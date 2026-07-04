@@ -1,12 +1,30 @@
 package main
 
 import (
+	"encoding/binary"
 	"fmt"
 	"io"
+	"math"
 	"os"
 
 	"github.com/benjojo/bpm"
-	"github.com/hajimehoshi/go-mp3"
+	mp3 "github.com/hajimehoshi/go-mp3"
+)
+
+const (
+	// energyInterval mirrors benjojo/bpm's INTERVAL: one energy sample is
+	// emitted per this many mono PCM samples.
+	energyInterval = 128
+	// referenceRate mirrors benjojo/bpm's RATE constant; detected values must
+	// be rescaled when the source sample rate differs.
+	referenceRate = 44100.0
+
+	minBPM      = 60.0
+	maxBPM      = 200.0
+	scanSteps   = 2048 // bpm-tools defaults
+	scanSamples = 1024
+
+	minAudioSeconds = 10.0
 )
 
 func detectBPM(filePath string) (float64, error) {
@@ -16,24 +34,26 @@ func detectBPM(filePath string) (float64, error) {
 	}
 	defer file.Close()
 
-	decoder, err := mp3.NewDecoder(file)
+	return detectBPMFromMP3(file)
+}
+
+func detectBPMFromMP3(r io.Reader) (float64, error) {
+	decoder, err := mp3.NewDecoder(r)
 	if err != nil {
 		return 0, fmt.Errorf("failed to decode mp3: %w", err)
 	}
 
-	var samples []float32
-	buf := make([]byte, 8192)
-
+	acc := &energyAccumulator{}
+	// go-mp3 always outputs 16-bit little-endian stereo at the source rate.
+	// Stream it through the energy accumulator so we never hold the full PCM
+	// data in memory (the Wasm sandbox has a limited heap).
+	buf := make([]byte, 32*1024)
+	rem := 0
 	for {
-		n, err := decoder.Read(buf)
-		if n > 0 {
-			// go-mp3 outputs 16-bit little-endian stereo by default
-			for i := 0; i < n-1; i += 2 {
-				// parse little-endian int16
-				sample := int16(buf[i]) | (int16(buf[i+1]) << 8)
-				samples = append(samples, float32(sample))
-			}
-		}
+		n, err := decoder.Read(buf[rem:])
+		total := rem + n
+		used := acc.feedStereoS16LE(buf[:total])
+		rem = copy(buf, buf[used:total])
 		if err == io.EOF {
 			break
 		}
@@ -42,28 +62,58 @@ func detectBPM(filePath string) (float64, error) {
 		}
 	}
 
-	if len(samples) == 0 {
-		return 0, fmt.Errorf("no audio samples found")
+	return detectTempoFromEnergy(acc.nrg, int(decoder.SampleRate()))
+}
+
+// detectTempoFromEnergy scans an energy envelope (as produced by
+// energyAccumulator from PCM at the given sample rate) for its tempo.
+func detectTempoFromEnergy(nrg []float32, sampleRate int) (float64, error) {
+	minEnergySamples := int(minAudioSeconds * float64(sampleRate) / energyInterval)
+	if len(nrg) < minEnergySamples {
+		return 0, fmt.Errorf("not enough audio to analyze (%d energy samples)", len(nrg))
 	}
 
-	// Downmix stereo to mono if needed
-	// Actually go-mp3 is always stereo unless the source is mono, but let's assume it's stereo 
-	// benjojo/bpm requires a float32 array, probably mono. 
-	// We'll downmix by averaging every 2 samples.
-	var mono []float32
-	for i := 0; i < len(samples)-1; i += 2 {
-		mono = append(mono, (samples[i]+samples[i+1])/2)
+	detected := bpm.ScanForBpm(nrg, minBPM, maxBPM, scanSteps, scanSamples)
+	// benjojo/bpm assumes 44100Hz input; rescale for the actual rate.
+	detected *= float64(sampleRate) / referenceRate
+
+	if math.IsNaN(detected) || detected < minBPM || detected > maxBPM {
+		return 0, fmt.Errorf("no plausible tempo found (got %.1f)", detected)
 	}
-
-	nrg := bpm.ReadFloatArray(mono)
-	if len(nrg) == 0 {
-		return 0, fmt.Errorf("failed to process energy array")
-	}
-
-	// The sampling rate of energy array in benjojo/bpm is based on INTERVAL which is hardcoded.
-	// We call ScanForBpm with sensible limits.
-	// slowest = 60, fastest = 200, steps = 10000, samples = len(nrg)
-	detected := bpm.ScanForBpm(nrg, 60.0, 200.0, 10000, len(nrg))
-
 	return detected, nil
+}
+
+// energyAccumulator folds PCM samples into benjojo/bpm's energy envelope
+// (the same peak-follower as its ReadFloatArray, but incremental).
+type energyAccumulator struct {
+	v   float64
+	n   int
+	nrg []float32
+}
+
+func (a *energyAccumulator) addMono(sample float64) {
+	z := math.Abs(sample)
+	if z > a.v {
+		a.v += (z - a.v) / 8
+	} else {
+		a.v -= (a.v - z) / 512
+	}
+	a.n++
+	if a.n == energyInterval {
+		a.n = 0
+		a.nrg = append(a.nrg, float32(a.v))
+	}
+}
+
+// feedStereoS16LE consumes complete 4-byte L/R frames from buf, downmixing to
+// mono, and returns the number of bytes consumed. Leftover bytes of a partial
+// frame must be carried over into the next call.
+func (a *energyAccumulator) feedStereoS16LE(buf []byte) int {
+	consumed := len(buf) - len(buf)%4
+	for i := 0; i < consumed; i += 4 {
+		l := int16(binary.LittleEndian.Uint16(buf[i:]))
+		r := int16(binary.LittleEndian.Uint16(buf[i+2:]))
+		a.addMono((float64(l) + float64(r)) / 2)
+	}
+	return consumed
 }

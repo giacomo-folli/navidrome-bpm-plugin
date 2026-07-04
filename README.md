@@ -6,7 +6,8 @@ A native WebAssembly plugin for Navidrome that analyzes local music files, detec
 
 - **Native Navidrome Plugin**: Runs entirely within Navidrome's secure WebAssembly sandbox (Extism). No external daemons, docker containers, or API polling required.
 - **Pure-Go BPM Detection**: Uses `go-mp3` and `benjojo/bpm` to decode and analyze MP3s in-memory without relying on host system binaries like `aubio`.
-- **Zero Configuration Setup**: Configure the scan interval and target playlist names directly from the Navidrome Web UI.
+- **BPM Playlists**: Analyzed songs are grouped into auto-created "BPM 120-129" style playlists via the Subsonic API (the sandbox filesystem is read-only, so tags can't be written).
+- **Zero Configuration Setup**: Configure the scan interval directly from the Navidrome Web UI.
 - **Efficient Caching**: Remembers analyzed files using Navidrome's native `KVStore` host service.
 
 ## Installation
