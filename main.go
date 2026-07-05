@@ -79,6 +79,10 @@ func run(cfg Config) error {
 	}
 	defer watcher.close()
 
+	// A path can be queued twice (initial scan + a watcher event); make sure
+	// two workers never process the same file at once — they would race on
+	// the same temp file during the tag write.
+	var inflight sync.Map
 	var workers sync.WaitGroup
 	for range cfg.Workers {
 		workers.Add(1)
@@ -89,9 +93,13 @@ func run(cfg Config) error {
 				case <-ctx.Done():
 					return
 				case path := <-jobs:
+					if _, busy := inflight.LoadOrStore(path, struct{}{}); busy {
+						continue
+					}
 					if err := processFile(ctx, cfg, path, fails, suppress); err != nil {
 						slog.Warn("processing failed", "path", path, "err", err)
 					}
+					inflight.Delete(path)
 				}
 			}
 		}()
