@@ -22,6 +22,15 @@ func main() {
 
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: cfg.LogLevel})))
 
+	if cfg.List {
+		// Tag reading is pure Go, so no aubio/ffmpeg prereqs apply here.
+		if err := listUntagged(context.Background(), cfg, os.Stdout); err != nil {
+			slog.Error(err.Error())
+			os.Exit(1)
+		}
+		return
+	}
+
 	if err := checkPrereqs(); err != nil {
 		slog.Error(err.Error())
 		os.Exit(1)

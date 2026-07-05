@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -142,6 +143,33 @@ func TestWriteBPMOverwrite(t *testing.T) {
 	has, val := hasBPMTag(path)
 	if !has || val != "145" {
 		t.Fatalf("after overwrite got (%v, %q), want (true, 145)", has, val)
+	}
+}
+
+func TestListUntagged(t *testing.T) {
+	dir := t.TempDir()
+	tagged := filepath.Join(dir, "tagged.mp3")
+	untagged := filepath.Join(dir, "sub", "untagged.mp3")
+	if err := os.Mkdir(filepath.Dir(untagged), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(makeFixture(t, ".mp3"), tagged); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(makeFixture(t, ".mp3"), untagged); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeBPM(tagged, 128, false); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := Config{MusicDir: dir, Extensions: map[string]bool{".mp3": true}}
+	var out strings.Builder
+	if err := listUntagged(context.Background(), cfg, &out); err != nil {
+		t.Fatalf("listUntagged: %v", err)
+	}
+	if got := strings.TrimSpace(out.String()); got != untagged {
+		t.Fatalf("listUntagged output %q, want %q", got, untagged)
 	}
 }
 

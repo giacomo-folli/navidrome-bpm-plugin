@@ -17,6 +17,7 @@ type Config struct {
 	Workers        int
 	DryRun         bool
 	Overwrite      bool
+	List           bool
 	LogLevel       slog.Level
 	SettleDelay    time.Duration
 	RescanInterval time.Duration
@@ -34,6 +35,7 @@ func loadConfig(args []string) (Config, error) {
 	fs.IntVar(&cfg.Workers, "workers", max(1, runtime.NumCPU()/2), "number of parallel analysis workers")
 	fs.BoolVar(&cfg.DryRun, "dry-run", false, "log what would be written without modifying files")
 	fs.BoolVar(&cfg.Overwrite, "overwrite", false, "re-analyze and overwrite existing BPM tags")
+	fs.BoolVar(&cfg.List, "list", false, "print files without a BPM tag and exit")
 	fs.StringVar(&level, "log-level", "info", "log level: debug|info|warn|error")
 	fs.DurationVar(&cfg.SettleDelay, "settle", 3*time.Second, "wait for a file to stop changing before analyzing it")
 	fs.DurationVar(&cfg.RescanInterval, "rescan", 0, "interval between full rescans (0 = only at startup)")

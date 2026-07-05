@@ -51,6 +51,7 @@ sudo make install     # installs to /usr/local/bin
 bpmd -dir /srv/music                  # watch and tag
 bpmd -dir /srv/music -dry-run        # log what would be written, touch nothing
 bpmd -dir /srv/music -overwrite      # re-analyze files that already have a BPM tag
+bpmd -dir /srv/music -list           # print files without a BPM tag and exit
 ```
 
 | Flag         | Default                    | Description                                    |
@@ -60,6 +61,7 @@ bpmd -dir /srv/music -overwrite      # re-analyze files that already have a BPM 
 | `-workers`   | half the CPU cores         | Parallel analysis workers                      |
 | `-dry-run`   | off                        | Log intended writes without modifying files    |
 | `-overwrite` | off                        | Overwrite existing BPM tags                    |
+| `-list`      | off                        | Print files without a BPM tag, then exit       |
 | `-settle`    | `3s`                       | Wait for files to stop changing before analysis |
 | `-rescan`    | `0` (startup only)         | Interval between periodic full rescans         |
 | `-log-level` | `info`                     | `debug`, `info`, `warn`, or `error`            |

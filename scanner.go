@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"path/filepath"
@@ -33,6 +35,21 @@ func fullScan(ctx context.Context, cfg Config, enqueue func(string)) error {
 		}
 		return nil
 	})
+}
+
+// listUntagged walks the music dir and prints every candidate file that has
+// no BPM tag to stdout, one path per line.
+func listUntagged(ctx context.Context, cfg Config, out io.Writer) error {
+	var files, untagged int
+	err := fullScan(ctx, cfg, func(path string) {
+		files++
+		if has, _ := hasBPMTag(path); !has {
+			untagged++
+			fmt.Fprintln(out, path)
+		}
+	})
+	slog.Info("scan complete", "files", files, "untagged", untagged)
+	return err
 }
 
 // isCandidate reports whether a path looks like an audio file we handle.
