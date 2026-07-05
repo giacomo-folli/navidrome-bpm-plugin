@@ -49,6 +49,23 @@ func TestBPMFromBeatsImplausible(t *testing.T) {
 	}
 }
 
+func TestBPMFromDirect(t *testing.T) {
+	// The unified `aubio tempo` CLI prints a single "142.42 bpm" line.
+	bpm, err := bpmFromDirect(parseBeatLines("142.424242 bpm\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bpm != 142 {
+		t.Fatalf("got %v, want 142", bpm)
+	}
+	if _, err := bpmFromDirect(nil); err == nil {
+		t.Fatal("want error for empty output")
+	}
+	if _, err := bpmFromDirect([]float64{999}); err == nil {
+		t.Fatal("want error for implausible tempo")
+	}
+}
+
 func TestParseBeatLines(t *testing.T) {
 	out := "0.487528\n0.998866\nsome warning line\n1.486077\n\n2.001678 extra\n"
 	beats := parseBeatLines(out)

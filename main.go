@@ -34,11 +34,11 @@ func main() {
 }
 
 func checkPrereqs() error {
-	cmd := tempoCommand()
-	if cmd == nil {
+	engine := tempoCommand()
+	if engine == nil {
 		return fmt.Errorf("no aubio beat tracker (aubio or aubiotrack) found in PATH; install it (Arch: pacman -S aubio, Debian: apt install aubio-tools)")
 	}
-	slog.Info("found beat tracker", "command", strings.Join(cmd, " "))
+	slog.Info("found beat tracker", "command", strings.Join(engine.args, " "))
 	if _, err := exec.LookPath("ffmpeg"); err != nil {
 		slog.Warn("ffmpeg not found in PATH; decode fallback and m4a/ogg/opus tagging will be unavailable")
 	}

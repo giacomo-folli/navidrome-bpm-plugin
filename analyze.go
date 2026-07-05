@@ -22,15 +22,22 @@ const (
 	perFileTimeout = 2 * time.Minute
 )
 
-// tempoCommand resolves the beat-tracking CLI once. The unified `aubio` tool
-// (Python distribution, Debian aubio-tools) and the classic `aubiotrack`
-// binary (Arch's aubio package) both print one beat timestamp per line.
-var tempoCommand = sync.OnceValue(func() []string {
+// tempoEngine describes the resolved aubio CLI. The unified `aubio tempo`
+// tool prints the final tempo as a single "142.42 bpm" line, while the
+// classic `aubiotrack` binary prints one beat timestamp per line that we
+// reduce to a tempo ourselves.
+type tempoEngine struct {
+	args   []string
+	direct bool // output is the BPM itself, not beat timestamps
+}
+
+// tempoCommand resolves the beat-tracking CLI once.
+var tempoCommand = sync.OnceValue(func() *tempoEngine {
 	if _, err := exec.LookPath("aubio"); err == nil {
-		return []string{"aubio", "tempo"}
+		return &tempoEngine{args: []string{"aubio", "tempo"}, direct: true}
 	}
 	if _, err := exec.LookPath("aubiotrack"); err == nil {
-		return []string{"aubiotrack"}
+		return &tempoEngine{args: []string{"aubiotrack"}}
 	}
 	return nil
 })
@@ -41,34 +48,48 @@ func detectBPM(ctx context.Context, path string) (float64, error) {
 	ctx, cancel := context.WithTimeout(ctx, perFileTimeout)
 	defer cancel()
 
-	beats, err := runAubioTempo(ctx, path)
-	if err != nil || len(beats) < minBeats {
+	bpm, err := runAubioTempo(ctx, path)
+	if err != nil {
 		fbBPM, fbErr := detectBPMViaFFmpeg(ctx, path)
 		if fbErr == nil {
 			return fbBPM, nil
 		}
-		if err == nil {
-			err = fmt.Errorf("only %d beats detected", len(beats))
-		}
 		return 0, fmt.Errorf("aubio: %w (ffmpeg fallback: %v)", err, fbErr)
 	}
-	return bpmFromBeats(beats)
+	return bpm, nil
 }
 
-// runAubioTempo returns the beat timestamps (seconds) reported by aubio.
-func runAubioTempo(ctx context.Context, path string) ([]float64, error) {
-	base := tempoCommand()
-	if base == nil {
-		return nil, fmt.Errorf("no aubio beat tracker found in PATH")
+// runAubioTempo runs the resolved aubio CLI on path and returns the tempo.
+func runAubioTempo(ctx context.Context, path string) (float64, error) {
+	engine := tempoCommand()
+	if engine == nil {
+		return 0, fmt.Errorf("no aubio beat tracker found in PATH")
 	}
-	cmd := exec.CommandContext(ctx, base[0], append(base[1:], path)...)
+	cmd := exec.CommandContext(ctx, engine.args[0], append(engine.args[1:], path)...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("%w: %s", err, firstLine(stderr.String()))
+		return 0, fmt.Errorf("%w: %s", err, firstLine(stderr.String()))
 	}
-	return parseBeatLines(stdout.String()), nil
+	values := parseBeatLines(stdout.String())
+	if engine.direct {
+		return bpmFromDirect(values)
+	}
+	return bpmFromBeats(values)
+}
+
+// bpmFromDirect interprets the output of the unified `aubio tempo` command,
+// which already prints the estimated tempo ("142.42 bpm").
+func bpmFromDirect(values []float64) (float64, error) {
+	if len(values) == 0 {
+		return 0, fmt.Errorf("aubio tempo printed no result")
+	}
+	bpm := float64(int(values[0] + 0.5))
+	if bpm < minValidBPM || bpm > maxValidBPM {
+		return 0, fmt.Errorf("implausible tempo %.0f BPM (valid range %d-%d)", bpm, minValidBPM, maxValidBPM)
+	}
+	return bpm, nil
 }
 
 // parseBeatLines extracts one float per line, skipping anything non-numeric
@@ -135,11 +156,7 @@ func detectBPMViaFFmpeg(ctx context.Context, path string) (float64, error) {
 		return 0, fmt.Errorf("ffmpeg decode: %w: %s", err, firstLine(stderr.String()))
 	}
 
-	beats, err := runAubioTempo(ctx, tmp.Name())
-	if err != nil {
-		return 0, err
-	}
-	return bpmFromBeats(beats)
+	return runAubioTempo(ctx, tmp.Name())
 }
 
 func firstLine(s string) string {
