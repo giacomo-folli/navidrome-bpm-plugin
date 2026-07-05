@@ -2,8 +2,11 @@ package main
 
 import (
 	"bytes"
+	"encoding/base64"
+	"encoding/binary"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -169,12 +172,18 @@ func writeBPMFFmpeg(path, value string) error {
 	}
 	args = append(args, tmp)
 
-	cmd := exec.Command("ffmpeg", args...)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
+	err := runFFmpeg(args)
+	if err != nil && isOgg(path) {
+		// The ogg muxer cannot carry cover art as a stream: the demuxer turns
+		// a METADATA_BLOCK_PICTURE comment (how yt-dlp embeds thumbnails) into
+		// an mjpeg/png video stream it then refuses to write back
+		// ("Unsupported codec id in stream 1"). Remux the audio alone and
+		// restore the art as a vorbis comment.
+		err = remuxOggAudioOnly(path, tmp, value)
+	}
+	if err != nil {
 		os.Remove(tmp)
-		return fmt.Errorf("ffmpeg remux: %w: %s", err, firstLine(stderr.String()))
+		return fmt.Errorf("ffmpeg remux: %w", err)
 	}
 	if err := preservePermissions(path, tmp); err != nil {
 		slog.Debug("could not preserve permissions", "path", path, "err", err)
@@ -182,6 +191,101 @@ func writeBPMFFmpeg(path, value string) error {
 	if err := os.Rename(tmp, path); err != nil {
 		os.Remove(tmp)
 		return fmt.Errorf("remux rename: %w", err)
+	}
+	return nil
+}
+
+func isOgg(path string) bool {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".ogg", ".oga", ".opus":
+		return true
+	}
+	return false
+}
+
+// remuxOggAudioOnly rewrites path to tmp keeping only the audio stream. The
+// existing tags are round-tripped through an ffmetadata file (avoids argv
+// size limits for large covers), with BPM added and any embedded cover art
+// re-encoded as a METADATA_BLOCK_PICTURE comment.
+func remuxOggAudioOnly(path, tmp, value string) error {
+	metaFile := tmp + ".ffmeta"
+	defer os.Remove(metaFile)
+	if err := runFFmpeg([]string{"-v", "error", "-y", "-i", path, "-f", "ffmetadata", metaFile}); err != nil {
+		return fmt.Errorf("metadata export: %w", err)
+	}
+
+	extra := "BPM=" + value + "\n"
+	if pic, err := extractCover(path); err != nil {
+		slog.Warn("dropping embedded cover art", "path", path, "err", err)
+	} else {
+		extra += "METADATA_BLOCK_PICTURE=" + escapeFFMeta(vorbisPicture(pic)) + "\n"
+	}
+	f, err := os.OpenFile(metaFile, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	_, werr := f.WriteString(extra)
+	if cerr := f.Close(); werr == nil {
+		werr = cerr
+	}
+	if werr != nil {
+		return fmt.Errorf("metadata append: %w", werr)
+	}
+
+	return runFFmpeg([]string{"-v", "error", "-y", "-i", path,
+		"-f", "ffmetadata", "-i", metaFile, "-map_metadata", "1",
+		"-map", "0:a", "-c", "copy", tmp})
+}
+
+// extractCover copies the embedded picture stream out of the container.
+func extractCover(path string) ([]byte, error) {
+	cmd := exec.Command("ffmpeg", "-v", "error", "-i", path,
+		"-map", "0:v:0", "-c", "copy", "-f", "image2pipe", "-")
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("%w: %s", err, firstLine(stderr.String()))
+	}
+	if stdout.Len() == 0 {
+		return nil, fmt.Errorf("empty picture stream")
+	}
+	return stdout.Bytes(), nil
+}
+
+// vorbisPicture encodes image data as a base64 FLAC picture block (type 3,
+// front cover), the standard METADATA_BLOCK_PICTURE payload for ogg/opus.
+// Width/height/depth are left 0 (unknown), which readers accept.
+func vorbisPicture(data []byte) string {
+	mime := http.DetectContentType(data)
+	var b bytes.Buffer
+	be32 := func(v uint32) { binary.Write(&b, binary.BigEndian, v) }
+	be32(3)
+	be32(uint32(len(mime)))
+	b.WriteString(mime)
+	be32(0) // description length
+	be32(0) // width
+	be32(0) // height
+	be32(0) // depth
+	be32(0) // palette colors
+	be32(uint32(len(data)))
+	b.Write(data)
+	return base64.StdEncoding.EncodeToString(b.Bytes())
+}
+
+// escapeFFMeta escapes the characters the ffmetadata format treats specially.
+func escapeFFMeta(s string) string {
+	return strings.NewReplacer(
+		`\`, `\\`, "=", `\=`, ";", `\;`, "#", `\#`, "\n", "\\\n",
+	).Replace(s)
+}
+
+func runFFmpeg(args []string) error {
+	cmd := exec.Command("ffmpeg", args...)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("%w: %s", err, firstLine(stderr.String()))
 	}
 	return nil
 }

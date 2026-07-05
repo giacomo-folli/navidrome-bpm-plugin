@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
@@ -16,9 +17,13 @@ func makeFixture(t *testing.T, ext string) string {
 		t.Skip("ffmpeg not installed")
 	}
 	path := filepath.Join(t.TempDir(), "fixture"+ext)
+	rate := "44100"
+	if ext == ".opus" {
+		rate = "48000" // libopus only encodes at 48k and below
+	}
 	out, err := exec.Command("ffmpeg", "-v", "error", "-y",
 		"-f", "lavfi", "-i", "sine=frequency=440:duration=2",
-		"-ar", "44100", path).CombinedOutput()
+		"-ar", rate, path).CombinedOutput()
 	if err != nil {
 		t.Fatalf("ffmpeg fixture (%s): %v: %s", ext, err, out)
 	}
@@ -58,6 +63,62 @@ func TestTagRoundTrip(t *testing.T) {
 				t.Fatalf("duration after tagging = %q, want ~2s", out)
 			}
 		})
+	}
+}
+
+// countStreams returns the number of streams ffprobe sees in the file.
+func countStreams(t *testing.T, path string) int {
+	t.Helper()
+	out, err := exec.Command("ffprobe", "-v", "error", "-show_entries",
+		"stream=index", "-of", "csv=p=0", path).Output()
+	if err != nil {
+		t.Fatalf("ffprobe streams: %v", err)
+	}
+	return len(strings.Fields(string(out)))
+}
+
+// TestTagOpusWithCoverArt reproduces the yt-dlp case: an opus file whose
+// METADATA_BLOCK_PICTURE cover the ogg demuxer exposes as a video stream,
+// which the plain -map 0 remux cannot write back. The tag write must still
+// succeed and the art must survive.
+func TestTagOpusWithCoverArt(t *testing.T) {
+	path := makeFixture(t, ".opus")
+
+	// Build a tiny jpeg and embed it the way the daemon re-embeds art.
+	jpg := filepath.Join(t.TempDir(), "cover.jpg")
+	out, err := exec.Command("ffmpeg", "-v", "error", "-y",
+		"-f", "lavfi", "-i", "color=red:size=64x64", "-frames:v", "1", jpg).CombinedOutput()
+	if err != nil {
+		t.Fatalf("ffmpeg cover fixture: %v: %s", err, out)
+	}
+	pic, err := os.ReadFile(jpg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta := filepath.Join(t.TempDir(), "meta.txt")
+	if err := os.WriteFile(meta, []byte(";FFMETADATA1\nMETADATA_BLOCK_PICTURE="+
+		escapeFFMeta(vorbisPicture(pic))+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	withArt := filepath.Join(t.TempDir(), "art.opus")
+	out, err = exec.Command("ffmpeg", "-v", "error", "-y", "-i", path,
+		"-f", "ffmetadata", "-i", meta, "-map_metadata", "1",
+		"-map", "0:a", "-c", "copy", withArt).CombinedOutput()
+	if err != nil {
+		t.Fatalf("ffmpeg embed art: %v: %s", err, out)
+	}
+	if n := countStreams(t, withArt); n != 2 {
+		t.Fatalf("art fixture has %d streams, want 2 (audio + attached pic)", n)
+	}
+
+	if err := writeBPM(withArt, 128, false); err != nil {
+		t.Fatalf("writeBPM: %v", err)
+	}
+	if has, val := hasBPMTag(withArt); !has || strings.TrimSpace(val) != "128" {
+		t.Fatalf("after write got (%v, %q), want (true, 128)", has, val)
+	}
+	if n := countStreams(t, withArt); n != 2 {
+		t.Fatalf("cover art lost: %d streams after tagging, want 2", n)
 	}
 }
 
