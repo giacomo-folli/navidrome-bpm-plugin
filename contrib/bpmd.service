@@ -1,0 +1,18 @@
+[Unit]
+Description=BPM tagging daemon for music libraries
+After=network.target
+
+[Service]
+ExecStart=/usr/local/bin/bpmd -dir /srv/music -workers 2
+# Must have write access to the music files (typically the same user Navidrome runs as).
+User=navidrome
+Restart=on-failure
+
+# Optional hardening
+ProtectSystem=strict
+ReadWritePaths=/srv/music
+PrivateTmp=true
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,5 +1,15 @@
-.PHONY: build
+BINARY = bpmd
 
 build:
-	GOOS=wasip1 GOARCH=wasm go build -o plugin.wasm -buildmode=c-shared .
-	zip -j navidrome-bpm-plugin.ndp manifest.json plugin.wasm
+	go build -o $(BINARY) .
+
+test:
+	go test ./...
+
+install: build
+	install -Dm755 $(BINARY) /usr/local/bin/$(BINARY)
+
+clean:
+	rm -f $(BINARY)
+
+.PHONY: build test install clean

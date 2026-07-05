@@ -1,3 +1,1 @@
-*.wasm
-*.ndp
-navidrome-bpm-plugin
+bpmd
