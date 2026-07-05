@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/dhowden/tag"
 )
 
 // makeFixture generates a short silent-ish audio file via ffmpeg.
@@ -120,6 +122,53 @@ func TestTagOpusWithCoverArt(t *testing.T) {
 	}
 	if n := countStreams(t, withArt); n != 2 {
 		t.Fatalf("cover art lost: %d streams after tagging, want 2", n)
+	}
+}
+
+// TestHasBPMTagBrokenUTF16Frame reproduces the spotdown.app case: the tag
+// carries a UTF-16 text frame with an odd byte count, which makes dhowden/tag
+// abort the whole parse and hide a valid TBPM. hasBPMTag must fall back to a
+// per-frame reader so the file is not re-analyzed forever.
+func TestHasBPMTagBrokenUTF16Frame(t *testing.T) {
+	src, err := os.ReadFile(makeFixture(t, ".mp3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// ID3v2.3 TIT2 frame: encoding 0x01 (UTF-16 with BOM) + BOM + 3 bytes,
+	// an odd-length UTF-16 payload.
+	body := []byte{0x01, 0xFF, 0xFE, 'A', 0x00, 'B'}
+	frame := append([]byte{'T', 'I', 'T', '2', 0, 0, 0, byte(len(body)), 0, 0}, body...)
+	tagSize := len(frame)
+	header := []byte{'I', 'D', '3', 3, 0, 0,
+		byte(tagSize >> 21 & 0x7F), byte(tagSize >> 14 & 0x7F),
+		byte(tagSize >> 7 & 0x7F), byte(tagSize & 0x7F)}
+
+	path := filepath.Join(t.TempDir(), "broken.mp3")
+	if err := os.WriteFile(path, append(append(header, frame...), src...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// The fixture must actually trip dhowden/tag, or the fallback under test
+	// is never reached.
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tag.ReadFrom(f); err == nil {
+		t.Fatal("dhowden/tag parsed the broken fixture; it no longer exercises the fallback")
+	}
+	f.Close()
+
+	if has, val := hasBPMTag(path); has {
+		t.Fatalf("broken fixture unexpectedly has BPM tag %q", val)
+	}
+	if err := writeBPM(path, 158, false); err != nil {
+		t.Fatalf("writeBPM: %v", err)
+	}
+	has, val := hasBPMTag(path)
+	if !has || val != "158" {
+		t.Fatalf("after write got (%v, %q), want (true, 158)", has, val)
 	}
 }
 

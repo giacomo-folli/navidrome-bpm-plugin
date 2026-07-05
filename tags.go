@@ -48,6 +48,15 @@ func hasBPMTag(path string) (bool, string) {
 
 	meta, err := tag.ReadFrom(f)
 	if err != nil {
+		// dhowden/tag aborts the whole parse on one malformed frame (e.g. the
+		// odd-length UTF-16 text frames some downloaders write), hiding a valid
+		// TBPM and causing endless re-analysis. Fall back to bogem/id3v2, which
+		// decodes only the frame we ask for.
+		if strings.ToLower(filepath.Ext(path)) == ".mp3" {
+			if has, v := readTBPMID3(path); has {
+				return true, v
+			}
+		}
 		slog.Debug("could not read tags, treating as untagged", "path", path, "err", err)
 		return false, ""
 	}
@@ -61,6 +70,21 @@ func hasBPMTag(path string) (bool, string) {
 		}
 	}
 	return false, ""
+}
+
+// readTBPMID3 reads the TBPM frame with bogem/id3v2, ignoring all other
+// frames so malformed ones elsewhere in the tag cannot break the read.
+func readTBPMID3(path string) (bool, string) {
+	t, err := id3v2.Open(path, id3v2.Options{Parse: true, ParseFrames: []string{"BPM"}})
+	if err != nil {
+		return false, ""
+	}
+	defer t.Close()
+	s := strings.TrimSpace(t.GetTextFrame(t.CommonID("BPM")).Text)
+	if s == "" || s == "0" {
+		return false, ""
+	}
+	return true, s
 }
 
 // writeBPM writes the BPM tag in place, dispatching on file extension.
