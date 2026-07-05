@@ -48,6 +48,14 @@ const (
 	pendingTTL = 3600
 )
 
+// wallNow returns the current time without a monotonic reading. Navidrome's
+// wazero runtime enables the real wall clock but leaves the monotonic clock
+// fake (it advances 1ms per read), so time.Since/Before/After on plain
+// time.Now() values measure nothing real. Round(0) strips the monotonic
+// reading, making comparisons use the wall clock. All deadline and
+// elapsed-time math in this plugin must go through this helper.
+func wallNow() time.Time { return time.Now().Round(0) }
+
 type bpmPlugin struct{}
 
 func init() {
@@ -205,8 +213,8 @@ func processBatch() error {
 	}
 	sync := &playlistSync{client: client}
 
-	deadline := time.Now().Add(batchTimeBudget)
-	for len(queue) > 0 && time.Now().Before(deadline) {
+	deadline := wallNow().Add(batchTimeBudget)
+	for len(queue) > 0 && wallNow().Before(deadline) {
 		albumID := queue[0]
 		songs, err := client.fetchAlbumSongs(albumID)
 		if err != nil {
@@ -217,7 +225,7 @@ func processBatch() error {
 
 		done := true
 		for _, s := range songs {
-			if time.Now().After(deadline) {
+			if wallNow().After(deadline) {
 				done = false // revisit this album next batch; analyzed songs are cached
 				break
 			}
@@ -271,9 +279,9 @@ func processSong(libs []host.Library, sync *playlistSync, s song, stats *scanSta
 	}
 	host.KVStoreSetWithTTL(pendingKey, []byte("1"), pendingTTL)
 
-	start := time.Now()
+	start := wallNow()
 	tempo, err := analyzeSong(libs, s)
-	elapsed := time.Since(start).Round(100 * time.Millisecond)
+	elapsed := wallNow().Sub(start).Round(100 * time.Millisecond)
 	host.KVStoreDelete(pendingKey)
 	if err != nil {
 		stats.Failed++

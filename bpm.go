@@ -63,12 +63,12 @@ func detectBPM(filePath string) (float64, error) {
 }
 
 func detectBPMFromMP3(r io.Reader) (float64, error) {
-	initStart := time.Now()
+	initStart := wallNow()
 	decoder, err := mp3.NewDecoder(r)
 	if err != nil {
 		return 0, fmt.Errorf("failed to decode mp3: %w", err)
 	}
-	initElapsed := time.Since(initStart)
+	initElapsed := wallNow().Sub(initStart)
 
 	sampleRate := int(decoder.SampleRate())
 	maxEnergySamples := int(maxAudioSeconds * float64(sampleRate) / energyInterval)
@@ -77,7 +77,7 @@ func detectBPMFromMP3(r io.Reader) (float64, error) {
 	// go-mp3 always outputs 16-bit little-endian stereo at the source rate.
 	// Stream it through the energy accumulator so we never hold the full PCM
 	// data in memory (the Wasm sandbox has a limited heap).
-	decodeStart := time.Now()
+	decodeStart := wallNow()
 	deadline := decodeStart.Add(analysisSoftDeadline)
 	// Keep the buffer small (~2 MP3 frames of PCM) so each Read decodes only
 	// a sliver of audio and the deadline check above it runs often; Wasm has
@@ -86,7 +86,7 @@ func detectBPMFromMP3(r io.Reader) (float64, error) {
 	rem := 0
 	minEnergySamples := int(minAudioSeconds * float64(sampleRate) / energyInterval)
 	for len(acc.nrg) < maxEnergySamples {
-		if time.Now().After(deadline) {
+		if wallNow().After(deadline) {
 			// A slow host may not decode maxAudioSeconds in time; analyze
 			// whatever is buffered rather than failing, as long as it clears
 			// the minimum the tempo scan needs.
@@ -94,7 +94,7 @@ func detectBPMFromMP3(r io.Reader) (float64, error) {
 				break
 			}
 			return 0, fmt.Errorf("decode too slow: %.1fs of audio in %s (decoder init took %s)",
-				audioSeconds(len(acc.nrg), sampleRate), time.Since(decodeStart).Round(100*time.Millisecond), initElapsed.Round(time.Millisecond))
+				audioSeconds(len(acc.nrg), sampleRate), wallNow().Sub(decodeStart).Round(100*time.Millisecond), initElapsed.Round(time.Millisecond))
 		}
 		n, err := decoder.Read(buf[rem:])
 		total := rem + n
@@ -107,13 +107,13 @@ func detectBPMFromMP3(r io.Reader) (float64, error) {
 			return 0, fmt.Errorf("error reading mp3 data: %w", err)
 		}
 	}
-	decodeElapsed := time.Since(decodeStart)
+	decodeElapsed := wallNow().Sub(decodeStart)
 
-	scanStart := time.Now()
+	scanStart := wallNow()
 	tempo, err := detectTempoFromEnergy(acc.nrg, sampleRate)
 	pdk.Log(pdk.LogDebug, fmt.Sprintf("bpm timing: init=%s decode=%s (%.1fs audio) scan=%s",
 		initElapsed.Round(time.Millisecond), decodeElapsed.Round(time.Millisecond),
-		audioSeconds(len(acc.nrg), sampleRate), time.Since(scanStart).Round(time.Millisecond)))
+		audioSeconds(len(acc.nrg), sampleRate), wallNow().Sub(scanStart).Round(time.Millisecond)))
 	return tempo, err
 }
 
