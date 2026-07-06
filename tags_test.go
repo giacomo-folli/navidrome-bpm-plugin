@@ -172,6 +172,123 @@ func TestHasBPMTagBrokenUTF16Frame(t *testing.T) {
 	}
 }
 
+// makeCover builds a small jpeg and returns its bytes.
+func makeCover(t *testing.T) []byte {
+	t.Helper()
+	jpg := filepath.Join(t.TempDir(), "cover.jpg")
+	out, err := exec.Command("ffmpeg", "-v", "error", "-y",
+		"-f", "lavfi", "-i", "color=red:size=64x64", "-frames:v", "1", jpg).CombinedOutput()
+	if err != nil {
+		t.Fatalf("ffmpeg cover fixture: %v: %s", err, out)
+	}
+	pic, err := os.ReadFile(jpg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pic
+}
+
+// extractCoverBytes pulls the embedded picture back out of an mp3.
+func extractCoverBytes(t *testing.T, path string) []byte {
+	t.Helper()
+	pic, err := extractCover(path)
+	if err != nil {
+		t.Fatalf("cover art missing after tagging: %v", err)
+	}
+	return pic
+}
+
+// stripID3 removes a leading ID3v2 tag so tests can prepend their own.
+func stripID3(src []byte) []byte {
+	if len(src) < 10 || string(src[:3]) != "ID3" {
+		return src
+	}
+	size := int(src[6]&0x7F)<<21 | int(src[7]&0x7F)<<14 | int(src[8]&0x7F)<<7 | int(src[9]&0x7F)
+	return src[10+size:]
+}
+
+// TestWriteBPMMP3PreservesCoverArt covers the healthy in-place rewrite: an
+// mp3 with a well-formed tag and embedded cover must keep the art
+// byte-identical after tagging.
+func TestWriteBPMMP3PreservesCoverArt(t *testing.T) {
+	src := makeFixture(t, ".mp3")
+	pic := makeCover(t)
+	jpg := filepath.Join(t.TempDir(), "cover.jpg")
+	if err := os.WriteFile(jpg, pic, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "withart.mp3")
+	out, err := exec.Command("ffmpeg", "-v", "error", "-y", "-i", src, "-i", jpg,
+		"-map", "0:a", "-map", "1:v", "-c", "copy", "-id3v2_version", "3", path).CombinedOutput()
+	if err != nil {
+		t.Fatalf("ffmpeg embed art: %v: %s", err, out)
+	}
+
+	if risk := id3RewriteRisk(path); risk != "" {
+		t.Fatalf("healthy fixture flagged as risky (%s); test would not exercise the in-place path", risk)
+	}
+	if err := writeBPM(path, 128, false); err != nil {
+		t.Fatalf("writeBPM: %v", err)
+	}
+	if has, val := hasBPMTag(path); !has || strings.TrimSpace(val) != "128" {
+		t.Fatalf("after write got (%v, %q), want (true, 128)", has, val)
+	}
+	if got := extractCoverBytes(t, path); string(got) != string(pic) {
+		t.Fatalf("cover art changed after tagging: %d bytes, want %d", len(got), len(pic))
+	}
+}
+
+// TestWriteBPMMP3BlankFrameBeforeCover reproduces the cover-destroying case:
+// a zeroed frame header sitting before APIC (bad padding some downloaders
+// write) makes bogem/id3v2 stop parsing, so its Save() used to rewrite the
+// tag without the cover. The writer must detect this and take the ffmpeg
+// path, preserving the art.
+func TestWriteBPMMP3BlankFrameBeforeCover(t *testing.T) {
+	audio := stripID3(func() []byte {
+		src, err := os.ReadFile(makeFixture(t, ".mp3"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return src
+	}())
+	pic := makeCover(t)
+
+	title := append([]byte{'T', 'I', 'T', '2', 0, 0, 0, 5, 0, 0}, append([]byte{0}, []byte("Test")...)...)
+	apicBody := append([]byte{0}, []byte("image/jpeg")...)
+	apicBody = append(apicBody, 0, 3, 0) // mime nul, front cover, empty desc
+	apicBody = append(apicBody, pic...)
+	apic := append([]byte{'A', 'P', 'I', 'C',
+		byte(len(apicBody) >> 24), byte(len(apicBody) >> 16),
+		byte(len(apicBody) >> 8), byte(len(apicBody)), 0, 0}, apicBody...)
+
+	var frames []byte
+	frames = append(frames, title...)
+	frames = append(frames, make([]byte, 10)...) // blank frame header
+	frames = append(frames, apic...)
+	tagSize := len(frames)
+	header := []byte{'I', 'D', '3', 3, 0, 0,
+		byte(tagSize >> 21 & 0x7F), byte(tagSize >> 14 & 0x7F),
+		byte(tagSize >> 7 & 0x7F), byte(tagSize & 0x7F)}
+
+	path := filepath.Join(t.TempDir(), "blankframe.mp3")
+	if err := os.WriteFile(path, append(append(header, frames...), audio...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if risk := id3RewriteRisk(path); risk == "" {
+		t.Fatal("id3RewriteRisk did not flag the blank-frame fixture")
+	}
+	if err := writeBPM(path, 128, false); err != nil {
+		t.Fatalf("writeBPM: %v", err)
+	}
+	if has, val := hasBPMTag(path); !has || strings.TrimSpace(val) != "128" {
+		t.Fatalf("after write got (%v, %q), want (true, 128)", has, val)
+	}
+	if got := extractCoverBytes(t, path); len(got) == 0 {
+		t.Fatal("cover art lost after tagging")
+	}
+}
+
 func TestWriteBPMDryRun(t *testing.T) {
 	path := makeFixture(t, ".mp3")
 	if err := writeBPM(path, 128, true); err != nil {

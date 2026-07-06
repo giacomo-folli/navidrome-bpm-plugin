@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -108,6 +109,13 @@ func writeBPM(path string, bpm float64, dryRun bool) error {
 }
 
 func writeBPMID3(path, value string) error {
+	// bogem/id3v2 parses the whole tag and rewrites it from what it parsed, so
+	// anything it silently skips is destroyed on Save. Route risky tags
+	// through the ffmpeg remux instead, which handles them correctly.
+	if reason := id3RewriteRisk(path); reason != "" {
+		slog.Warn("mp3 tag unsafe for in-place rewrite, remuxing with ffmpeg", "path", path, "reason", reason)
+		return writeBPMFFmpeg(path, value)
+	}
 	t, err := id3v2.Open(path, id3v2.Options{Parse: true})
 	if err != nil {
 		return fmt.Errorf("id3v2 open: %w", err)
@@ -118,6 +126,81 @@ func writeBPMID3(path, value string) error {
 		return fmt.Errorf("id3v2 save: %w", err)
 	}
 	return nil
+}
+
+// id3RewriteRisk reports why an in-place bogem/id3v2 rewrite could silently
+// drop or corrupt frames; empty string means the tag is safe. The library
+// ignores the tag header flags byte (unsynchronisation, extended header) and
+// all per-frame flags, and it stops parsing at the first malformed frame
+// header — Save() then writes back only the frames parsed so far. APIC
+// usually sits last in the tag, so embedded cover art is the typical
+// casualty.
+func id3RewriteRisk(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return "" // let the writer surface the real error
+	}
+	defer f.Close()
+
+	hdr := make([]byte, 10)
+	if _, err := io.ReadFull(f, hdr); err != nil || string(hdr[:3]) != "ID3" {
+		return "" // no v2 tag: bogem writes a fresh one, nothing to lose
+	}
+	version := hdr[3]
+	if version < 3 {
+		return "id3v2.2 tag"
+	}
+	if hdr[5] != 0 {
+		return fmt.Sprintf("tag header flags 0x%02x", hdr[5])
+	}
+	size := int(hdr[6]&0x7F)<<21 | int(hdr[7]&0x7F)<<14 | int(hdr[8]&0x7F)<<7 | int(hdr[9]&0x7F)
+	area := make([]byte, size)
+	if _, err := io.ReadFull(f, area); err != nil {
+		return "tag shorter than declared size"
+	}
+
+	pos := 0
+	for pos < len(area) {
+		if area[pos] == 0 {
+			// Padding starts here; anything non-zero after it is a frame the
+			// parser would never reach.
+			for _, b := range area[pos:] {
+				if b != 0 {
+					return "data after blank frame header"
+				}
+			}
+			return ""
+		}
+		if pos+10 > len(area) {
+			return "truncated frame header"
+		}
+		fh := area[pos : pos+10]
+		for _, c := range fh[:4] {
+			if (c < 'A' || c > 'Z') && (c < '0' || c > '9') {
+				return fmt.Sprintf("invalid frame id %q", fh[:4])
+			}
+		}
+		var fsize int
+		if version == 4 {
+			if (fh[4]|fh[5]|fh[6]|fh[7])&0x80 != 0 {
+				return "non-syncsafe frame size in v2.4 tag"
+			}
+			fsize = int(fh[4])<<21 | int(fh[5])<<14 | int(fh[6])<<7 | int(fh[7])
+		} else {
+			fsize = int(fh[4])<<24 | int(fh[5])<<16 | int(fh[6])<<8 | int(fh[7])
+		}
+		if fh[8] != 0 || fh[9] != 0 {
+			// Compression, encryption, grouping, per-frame unsync, data length
+			// indicator: bogem reads the body raw and writes the flags back as
+			// zero, corrupting the frame.
+			return fmt.Sprintf("frame %s has flags %02x%02x", fh[:4], fh[8], fh[9])
+		}
+		pos += 10 + fsize
+		if pos > len(area) {
+			return fmt.Sprintf("frame %s overflows tag area", fh[:4])
+		}
+	}
+	return ""
 }
 
 func writeBPMFLAC(path, value string) error {
@@ -179,7 +262,8 @@ func writeBPMFLAC(path, value string) error {
 }
 
 // writeBPMFFmpeg remuxes the file with a BPM metadata entry (stream copy, no
-// re-encoding). Used for m4a/ogg/opus where no maintained Go writer exists.
+// re-encoding). Used for m4a/ogg/opus where no maintained Go writer exists,
+// and as the fallback for mp3 tags bogem/id3v2 cannot safely rewrite.
 func writeBPMFFmpeg(path, value string) error {
 	if _, err := exec.LookPath("ffmpeg"); err != nil {
 		return fmt.Errorf("ffmpeg not available, cannot tag %s files", filepath.Ext(path))
@@ -191,6 +275,10 @@ func writeBPMFFmpeg(path, value string) error {
 		// use -movflags use_metadata_tags: it switches to the mdta scheme,
 		// which most tag readers (TagLib, mutagen, dhowden) cannot read.
 		args = append(args, "-metadata", "tmpo="+value)
+	} else if strings.ToLower(filepath.Ext(path)) == ".mp3" {
+		// v2.3 for compatibility with older readers; the mp3 muxer writes a
+		// 4-char uppercase key like TBPM verbatim as that frame.
+		args = append(args, "-id3v2_version", "3", "-metadata", "TBPM="+value)
 	} else {
 		args = append(args, "-metadata", "BPM="+value)
 	}
